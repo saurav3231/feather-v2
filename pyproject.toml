@@ -37,6 +37,12 @@ line_length = 88
 line-length = 88
 select = ["E", "F", "I"]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"

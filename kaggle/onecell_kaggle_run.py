@@ -30,7 +30,10 @@ os.chdir(WORK)
 run("pip install -q psutil codecarbon rich matplotlib tabulate colorama tokenizers datasets numpy", "Install deps")
 run("pip install -e . -q", "Install feather-v2")
 
+# Ensure feather_v2 is importable even if editable install missed src layout
 sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
 import importlib.util
 mega_path = os.path.join(REPO_ROOT, "kaggle", "test_all_sizes_mega.py")
 spec = importlib.util.spec_from_file_location("test_all_sizes_mega", mega_path)
