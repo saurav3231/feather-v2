@@ -89,7 +89,9 @@ class LiquidMemory(BaseComponent):
             "best_chunk_sim": retrieval["similarity"],
             "hv_mem_wht": np.zeros(self.hv_dim),
             "retention_w511": (
-                adaptive_fractional_weights(self.alpha, self.dim)[min(511, self.dim - 1)]
+                adaptive_fractional_weights(self.alpha, self.dim)[
+                    min(511, self.dim - 1)
+                ]
                 if self.dim > 0
                 else 0.0
             ),

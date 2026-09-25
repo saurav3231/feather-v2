@@ -41,7 +41,8 @@ def test_fresh_clone_loss_trend():
         x = data[step]
         out = model.forward(x)
         logits = (
-            np.asarray(out["final_output"], dtype=np.float64).flatten() @ model._logit_projection
+            np.asarray(out["final_output"], dtype=np.float64).flatten()
+            @ model._logit_projection
         )
         target = int(np.random.default_rng(step).integers(0, 256))
         target_vec = np.eye(256)[target]

@@ -30,7 +30,10 @@ def test_model_forward_loss_trend():
     for step in range(5):
         x = rng.standard_normal((64, 64))
         out = model.forward(x)
-        logits = np.asarray(out["final_output"], dtype=np.float64).flatten() @ model._logit_projection
+        logits = (
+            np.asarray(out["final_output"], dtype=np.float64).flatten()
+            @ model._logit_projection
+        )
         target = int(rng.integers(0, 256))
         target_vec = np.eye(256)[target]
         loss = float(np.mean((logits - target_vec) ** 2))

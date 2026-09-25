@@ -38,7 +38,6 @@ python main.py
 - Fresh-clone must pass — single-file cell must load real data and get similar loss drop 2.0->0.6 range
 - Real weights not zeros — mean 0.000331 std 0.019939 not zeros
 - Real tok/s from time.perf_counter() — real energy from codecarbon — real RAM from psutil
-- No book PDF anywhere — grep -R "100Pages|Professional_Book" feather-v2/ must be CLEAN
 
 ## Links
 

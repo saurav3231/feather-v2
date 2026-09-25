@@ -11,6 +11,7 @@ import torch
 
 try:
     from codecarbon import EmissionsTracker
+
     HAS_CODECARBON = True
 except ImportError:
     HAS_CODECARBON = False
@@ -25,14 +26,18 @@ def measure_train_tok_s(model, data_loader, steps=600, seq_len=512, batch_size=1
             break
         output = model.forward(batch)
         loss = torch.nn.functional.cross_entropy(
-            torch.tensor(output["final_output"], dtype=torch.float32).reshape(-1, output["final_output"].shape[-1]),
+            torch.tensor(output["final_output"], dtype=torch.float32).reshape(
+                -1, output["final_output"].shape[-1]
+            ),
             torch.randint(0, 256, (output["final_output"].shape[0],)),
         )
         loss.backward()
         tokens += seq_len * batch_size
     elapsed = time.perf_counter() - start
     train_tok_s = tokens / elapsed if elapsed > 0 else 0
-    print(f"[FIX] train tok/s real measured: {train_tok_s:.1f} tokens={tokens} elapsed={elapsed:.2f}s")
+    print(
+        f"[FIX] train tok/s real measured: {train_tok_s:.1f} tokens={tokens} elapsed={elapsed:.2f}s"
+    )
     return train_tok_s, tokens, elapsed
 
 
@@ -51,7 +56,9 @@ def measure_cpu_tok_s_batch1(model, vocab_size=256, seq_len=512, gen_tokens=20):
             generated += 1
     elapsed = time.perf_counter() - start
     cpu_tok_s = generated / elapsed if elapsed > 0 else 0
-    print(f"[FIX] CPU tok/s batch=1 real measured: {cpu_tok_s:.2f} generated={generated} elapsed={elapsed:.2f}s")
+    print(
+        f"[FIX] CPU tok/s batch=1 real measured: {cpu_tok_s:.2f} generated={generated} elapsed={elapsed:.2f}s"
+    )
     return cpu_tok_s
 
 
@@ -65,7 +72,9 @@ def measure_eval_tok_s(model, eval_loader):
             eval_tokens += batch.numel()
     elapsed = time.perf_counter() - start
     eval_tok_s = eval_tokens / elapsed if elapsed > 0 else 0
-    print(f"[FIX] eval tok/s real measured: {eval_tok_s:.1f} tokens={eval_tokens} elapsed={elapsed:.2f}s")
+    print(
+        f"[FIX] eval tok/s real measured: {eval_tok_s:.1f} tokens={eval_tokens} elapsed={elapsed:.2f}s"
+    )
     return eval_tok_s
 
 
@@ -95,12 +104,17 @@ def measure_energy_j_per_1k(tokens, tracker=None):
 def measure_context_recall():
     try:
         from feather_v2.utils import adaptive_p_adic_chunk_retrieve
+
         query = np.zeros(8192)
         chunks = np.random.default_rng(0).standard_normal((1779, 8192))
-        _, sim = adaptive_p_adic_chunk_retrieve(query, chunks, p=2, use_rough_path=True, use_fractional=True)
+        _, sim = adaptive_p_adic_chunk_retrieve(
+            query, chunks, p=2, use_rough_path=True, use_fractional=True
+        )
     except Exception:
         sim = 0.96
-    print(f"[FIX] context recall sim real measured: {sim:.2f} best chunk 0 3 hops to 1M")
+    print(
+        f"[FIX] context recall sim real measured: {sim:.2f} best chunk 0 3 hops to 1M"
+    )
     return sim
 
 
@@ -108,7 +122,9 @@ def calculate_momr(cpu_tok_s, context_len, ram_gb, energy_j_per_1k):
     if ram_gb == 0 or energy_j_per_1k == 0:
         return 0
     momr = (cpu_tok_s * context_len / ram_gb) / energy_j_per_1k
-    print(f"[FIX] MOMR real calculated: {momr:.1f} formula (gen tok/s * context / RAM) / energy = ({cpu_tok_s} * {context_len} / {ram_gb}) / {energy_j_per_1k}")
+    print(
+        f"[FIX] MOMR real calculated: {momr:.1f} formula (gen tok/s * context / RAM) / energy = ({cpu_tok_s} * {context_len} / {ram_gb}) / {energy_j_per_1k}"
+    )
     return momr
 
 

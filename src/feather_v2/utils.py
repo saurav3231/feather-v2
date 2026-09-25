@@ -567,7 +567,11 @@ def adaptive_jacobi_decode(
         token_vec = np.mean(updated, axis=0)
         token = int(np.argmax(token_vec)) if token_vec.size > 0 else 0
         generated.append(token)
-        seq = np.concatenate([seq, token_vec[None, :]], axis=0) if seq.ndim == 2 else np.concatenate([seq[:, None], token_vec[None, :]], axis=0)
+        seq = (
+            np.concatenate([seq, token_vec[None, :]], axis=0)
+            if seq.ndim == 2
+            else np.concatenate([seq[:, None], token_vec[None, :]], axis=0)
+        )
         seq = seq[-n:]
     return {
         "generated": np.array(generated, dtype=np.int64),
