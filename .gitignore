@@ -12,3 +12,4 @@ build/
 emissions.csv
 *.npz
 *.json
+!configs/*.json

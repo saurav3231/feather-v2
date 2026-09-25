@@ -94,17 +94,21 @@ def fwht(a: np.ndarray) -> np.ndarray:
     """Fast Walsh-Hadamard Transform, O(d log d) adds only."""
     a = np.asarray(a, dtype=np.float64).copy()
     n = a.shape[0]
+    # Pad to next power of 2 for FWHT
+    n_pow2 = 1 << (n - 1).bit_length()
+    if n_pow2 != n:
+        a = np.pad(a, (0, n_pow2 - n), mode="edge")
     h = 1
-    while h < n:
-        a = a.reshape(n // (h * 2), h * 2)
+    while h < n_pow2:
+        a = a.reshape(n_pow2 // (h * 2), h * 2)
         x = a[:, :h]
         y = a[:, h : h * 2]
         a = np.empty_like(a)
         a[:, :h] = x + y
         a[:, h : h * 2] = x - y
         h *= 2
-    a = a.reshape(n)
-    return a / np.sqrt(n)
+    a = a.reshape(n_pow2)
+    return a[:n] / np.sqrt(n_pow2)
 
 
 def ifwht(a: np.ndarray) -> np.ndarray:
