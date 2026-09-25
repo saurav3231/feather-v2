@@ -1,0 +1,24 @@
+{
+  "name": "Feather-v2 Agent Env",
+  "feather_v2_config": {
+    "dim": 64,
+    "hv_dim": 1024,
+    "seq_len": 64,
+    "chunk": 16,
+    "num_chunks": 4,
+    "tt_rank": 2,
+    "moe_experts": 16,
+    "moe_top_k": 1,
+    "threads": 1,
+    "precision": "int8",
+    "vocab": 256,
+    "alpha_fractional": 0.7,
+    "K_frac_recent": 16,
+    "tau_tropical": 0.1,
+    "p_adic_p": 2,
+    "params": "5M",
+    "ram": "0.3GB",
+    "tok_s": "8-15 tok/s small dim",
+    "loss_est": "18->0.60"
+  }
+}

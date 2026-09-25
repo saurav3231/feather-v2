@@ -1,0 +1,24 @@
+{
+  "name": "Feather-v2 i5-3337U",
+  "feather_v2_config": {
+    "dim": 384,
+    "hv_dim": 1024,
+    "seq_len": 512,
+    "chunk": 32,
+    "num_chunks": 16,
+    "tt_rank": 4,
+    "moe_experts": 64,
+    "moe_top_k": 1,
+    "threads": 2,
+    "precision": "int8",
+    "vocab": 4096,
+    "alpha_fractional": 0.7,
+    "K_frac_recent": 32,
+    "tau_tropical": 0.1,
+    "p_adic_p": 2,
+    "params": "20M",
+    "ram": "0.6GB",
+    "tok_s": "12-18 tok/s",
+    "loss_est": "18->0.60"
+  }
+}

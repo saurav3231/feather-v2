@@ -37,28 +37,28 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_MAP: dict[str, dict] = {
     "5M": {
         "size_label": "5M",
-        "dim": 256,
+        "dim": 192,
         "hv_dim": 2048,
         "seq_len": 512,
         "chunk": 32,
         "tt_rank": 4,
         "moe_experts": 24,
         "vocab": 8256,
-        "layers": 4,
+        "layers": 3,
         "batch_size": 1,
         "precision": "int8",
         "seed": 42,
     },
     "10M": {
         "size_label": "10M",
-        "dim": 320,
+        "dim": 256,
         "hv_dim": 4096,
         "seq_len": 512,
         "chunk": 32,
         "tt_rank": 4,
-        "moe_experts": 48,
+        "moe_experts": 32,
         "vocab": 8256,
-        "layers": 6,
+        "layers": 5,
         "batch_size": 1,
         "precision": "int8",
         "seed": 42,
@@ -260,7 +260,7 @@ def load_streaming_datasets() -> dict[str, dict]:
             },
             "wikipedia": {
                 "loader": lambda: load_dataset(
-                    "wikipedia", "20220301.en", streaming=True, split="train"
+                    "wikimedia/wikipedia", "20231101.en", streaming=True, split="train"
                 ),
                 "take": 25,
                 "desc": "Wikipedia (en)",
@@ -318,10 +318,10 @@ def load_streaming_datasets() -> dict[str, dict]:
 
     total_kb = sum(d["size_kb"] for d in datasets_info.values())
     quota_gb = 20.0
-    pct = (total_kb / 1024) / quota_gb * 100
+    pct = total_kb / (quota_gb * 1024 * 1024) * 100
     cprint(
         f"Total data: {total_kb:.1f} KB / {quota_gb:.0f} GB "
-        f"({pct:.5f}%) — quota safe ✓",
+        f"({pct:.4f}%) — quota safe ✓",
         _GREEN,
     )
     return datasets_info
@@ -377,10 +377,22 @@ def assert_real_varying_loss(losses: list[float]) -> bool:
     return ok
 
 
-def assert_real_ram(rss_mb: float) -> bool:
-    ok = rss_mb > 50.0
+def assert_real_ram(rss_mb: float, size_label: str = "") -> bool:
+    thresholds = {
+        "5M": 100.0,
+        "10M": 150.0,
+        "20M": 200.0,
+        "40M": 300.0,
+        "50M": 400.0,
+        "100M": 600.0,
+    }
+    threshold = thresholds.get(size_label, 50.0)
+    ok = rss_mb > threshold
     if not ok:
-        cprint(f"  FAIL RAM: {rss_mb:.1f} MB <= 50 MB", _RED)
+        cprint(
+            f"  FAIL RAM: {rss_mb:.1f} MB <= {threshold:.0f} MB (expected for {size_label})",
+            _RED,
+        )
     return ok
 
 
@@ -398,28 +410,34 @@ def _median(values: list[float]) -> float:
 
 
 def _measure_tokenizer_speed(model: FeatherV2Model, text: str, runs: int = 5) -> float:
-    times = []
     vocab = model.config.get("vocab", 8256)
+    token_times = []
     for _ in range(runs):
         start = time.perf_counter()
-        _, info = hybrid_adaptive_tokenizer(text, vocab_size=vocab)
+        tokens, info = hybrid_adaptive_tokenizer(text, vocab_size=vocab)
         elapsed = time.perf_counter() - start
-        times.append(elapsed)
-    med_s = _median(times)
-    chars = len(text)
-    tok_s = chars / max(1e-9, med_s)
-    return tok_s, info
+        n_tokens = max(1, tokens.size)
+        token_times.append(n_tokens / max(1e-9, elapsed))
+    med_tok_s = _median(token_times)
+    return med_tok_s, info
 
 
 def _measure_forward_throughput(
     model: FeatherV2Model, seq_lengths: list[int], runs: int = 5
 ) -> dict[int, float]:
     results = {}
+    dim = model.config.get("dim", 512)
     rng = np.random.default_rng(42)
+    warmup_seq = rng.standard_normal((32, dim))
+    for _ in range(2):
+        try:
+            _ = model.forward(warmup_seq)
+        except Exception:
+            pass
     for seq in seq_lengths:
         times = []
+        x = rng.standard_normal((seq, dim))
         for _ in range(runs):
-            x = rng.standard_normal((seq, model.config.get("dim", 512)))
             start = time.perf_counter()
             _ = model.forward(x)
             elapsed = time.perf_counter() - start
@@ -620,7 +638,7 @@ def test_one_size(size_label: str, config: dict, datasets_info: dict) -> dict[st
             ram_used = ram_after - ram_before
         except Exception:
             ram_used = max(50.0, params * 4 / (1024 * 1024))
-        ram_ok = assert_real_ram(ram_used)
+        ram_ok = assert_real_ram(ram_used, size_label=size_label)
         results["checks"].append(("ram_real", ram_ok))
         results["ram_mb"] = ram_used
         cprint(f"  RAM: {ram_used:.1f} MB", _GREEN if ram_ok else _RED)

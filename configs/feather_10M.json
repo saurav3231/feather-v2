@@ -1,0 +1,14 @@
+{
+    "size_label": "10M",
+    "dim": 256,
+    "hv_dim": 4096,
+    "seq_len": 512,
+    "chunk": 32,
+    "tt_rank": 4,
+    "moe_experts": 32,
+    "vocab": 8256,
+    "layers": 5,
+    "batch_size": 1,
+    "precision": "int8",
+    "seed": 42,
+}
