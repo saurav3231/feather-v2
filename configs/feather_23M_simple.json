@@ -1,0 +1,12 @@
+{
+  "dim": 384,
+  "hv_dim": 6144,
+  "seq_len": 512,
+  "chunk": 32,
+  "tt_rank": 4,
+  "moe_experts": 64,
+  "moe_top_k": 2,
+  "vocab": 8256,
+  "n_blocks": 2,
+  "seed": 42
+}

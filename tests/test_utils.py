@@ -177,6 +177,50 @@ def test_hybrid_adaptive_tokenizer_shapes():
     assert info["vocab_size"] == 8256
 
 
+def test_hybrid_adaptive_tokenizer_ids_stay_within_vocab():
+    """Ids must index the embedding table, so they must be < vocab_size.
+
+    An earlier version hashed 4-byte groups into a span sized for the byte alphabet
+    and emitted ids up to 503636 for vocab_size=8256, which crashed the embedding
+    lookup with an IndexError.
+    """
+    rng = np.random.default_rng(7)
+    words = ["model", "train", "token", "loss", "layer", "tensor", "weight", "batch"]
+    text = " ".join(
+        " ".join(rng.choice(words, size=int(rng.integers(4, 12)))) for _ in range(400)
+    )
+    for vocab_size in (256, 1024, 4096, 8256):
+        ids, info = hybrid_adaptive_tokenizer(
+            text, vocab_size=vocab_size, hardware_ram_gb=31.0
+        )
+        assert ids.min() >= 0, f"negative id at vocab_size={vocab_size}"
+        assert ids.max() < vocab_size, (
+            f"id {ids.max()} >= vocab_size {vocab_size}; "
+            f"reported max_id={info['max_id']}"
+        )
+        assert info["out_of_range_clipped"] == 0
+
+
+def test_hybrid_adaptive_tokenizer_counts_real_collisions_only():
+    """Repeating the same bytes is not a collision; two different runs sharing an id is.
+
+    The earlier counter incremented on every repeated token id, so highly repetitive
+    text was reported as thousands of collisions and flagged lossy even though a
+    deterministic tokenizer must map identical input to identical output.
+    """
+    text = "The quick brown fox. " * 200
+    ids, info = hybrid_adaptive_tokenizer(text, vocab_size=8256, hardware_ram_gb=31.0)
+    assert info["repeated_byte_runs"] > 0, "test text should repeat byte runs"
+    assert info["distinct_byte_runs"] < info["num_tokens"]
+    assert (
+        info["group_collisions"] == 0
+    ), "identical byte runs must not be reported as collisions"
+    assert info["lossy"] is False
+    # Identical input must produce identical output.
+    again, _ = hybrid_adaptive_tokenizer(text, vocab_size=8256, hardware_ram_gb=31.0)
+    assert np.array_equal(ids, again)
+
+
 def test_cos_sim_self_one():
     a = np.random.default_rng(0).standard_normal(64)
     assert np.isclose(cos_sim(a, a), 1.0, atol=1e-12)

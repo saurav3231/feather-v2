@@ -282,6 +282,70 @@ class TestParameterAccounting:
         assert written == path.stat().st_size
         assert written > 0
 
+    def test_num_bytes_honours_requested_dtype(self, model) -> None:
+        """num_bytes must follow the dtype argument.
+
+        It previously ignored the argument and always reported the float32 size, so
+        a float16 model claimed to need the same memory as float32.
+        """
+        f32 = model.num_bytes(torch.float32)
+        f16 = model.num_bytes(torch.float16)
+        assert f16 < f32, f"float16 ({f16}) must be smaller than float32 ({f32})"
+        assert f16 == pytest.approx(f32 / 2, rel=0.02)
+
+    def test_state_stability_is_finite_and_bounded(self, model) -> None:
+        model.eval()
+        report = model.state_stability(seq_len=16)
+        value = report["similarity"]
+        assert value is not None, f"no similarity captured: {report}"
+        assert math.isfinite(value)
+        assert -1.0001 <= value <= 1.0001
+
+    def test_state_stability_reports_model_hidden_dim(self, model) -> None:
+        """The reported width must be the residual stream, not the vocabulary."""
+        model.eval()
+        report = model.state_stability(seq_len=16)
+        assert report["hidden_dim"] == model.config["dim"], (
+            f"reported hidden_dim {report['hidden_dim']} != model dim "
+            f"{model.config['dim']} (vocab is {model.config['vocab']})"
+        )
+
+    def test_state_stability_leaves_training_mode_unchanged(self, model) -> None:
+        model.train()
+        model.state_stability(seq_len=16)
+        assert model.training, "measurement must not silently switch the model to eval"
+
+    def test_state_stability_is_deterministic(self, model) -> None:
+        """The same model and sequence must give the same score.
+
+        state_stability has to be a pure function of the weights, otherwise a value
+        plotted across a run is not comparable between rows.
+        """
+        torch.manual_seed(3)
+        model.eval()
+        first = model.state_stability(seq_len=16)["similarity"]
+        second = model.state_stability(seq_len=16)["similarity"]
+        assert first == pytest.approx(second, rel=1e-9)
+
+    def test_state_stability_ignores_vocab_width(self) -> None:
+        """The score must come from hidden states, not the embedding table.
+
+        It compares residual-stream vectors, so it has to stay a valid cosine
+        similarity. An earlier version mixed embedding-table columns into the
+        comparison, which made the number depend on vocab rather than on the
+        model's own width.
+        """
+        for vocab in (64, 4096):
+            torch.manual_seed(0)
+            wide = FeatherV2Model(dict(TINY, vocab=vocab))
+            wide.eval()
+            report = wide.state_stability(seq_len=16)
+            value = report["similarity"]
+            assert value is not None
+            assert math.isfinite(value)
+            assert -1.0001 <= value <= 1.0001
+            assert report["hidden_dim"] == TINY["dim"]
+
 
 class TestCheckpointing:
     def test_pth_roundtrip_preserves_weights(self, model, tmp_path) -> None:
@@ -470,7 +534,16 @@ class TestMathematics:
         config_dir = Path(__file__).resolve().parents[1] / "configs"
         checked = 0
         for path in sorted(config_dir.glob("feather_*.json")):
-            target = float(path.stem.split("_")[-1].rstrip("M"))
+            # The name may carry a descriptive suffix, e.g. feather_23M_simple.json,
+            # so the size is the token that starts with a digit and ends in M.
+            # Parsing the last token blindly turned "simple" into a float error.
+            size_tokens = [
+                token
+                for token in path.stem.split("_")
+                if token and token[0].isdigit() and token.endswith("M")
+            ]
+            assert size_tokens, f"{path.name} has no size token like 20M"
+            target = float(size_tokens[0].rstrip("M"))
             if target <= 0:
                 continue
             model = FeatherV2Model(M_load_config(path))

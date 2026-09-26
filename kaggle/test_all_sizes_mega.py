@@ -593,138 +593,14 @@ def _measure_loss_trend(
 def _measure_state_stability(
     model: FeatherV2Model, seq: int
 ) -> tuple[float | None, int]:
-    """Cosine similarity of a prefix's final hidden state with and without a suffix.
+    """Delegate to the shared model method.
 
-    The same token prefix is encoded twice: once on its own, and once as the
-    start of a longer sequence. The last position of the prefix is compared in
-    both cases, so the only difference is whether later tokens were present.
-
-    Comparing final *logits* instead would mix a vocab-wide vector into a
-    representation-similarity claim, and comparing the last position of a short
-    prefix against the last position of a long sequence would compare two
-    different positions. Both were wrong; this compares the same position of the
-    same content and reports hidden-state width.
-
-    Returns ``(None, 0)`` if no comparable hidden state can be captured.
+    The implementation lives on ``FeatherV2Model.state_stability`` so the ladder
+    benchmark and the training scripts measure exactly the same thing and cannot
+    drift apart. See that method for what the number does and does not mean.
     """
-    vocab = int(model.config["vocab"])
-    seq = min(seq, int(model.config["seq_len"]))
-    if seq < 4:
-        return None, 0
-
-    captured: dict[str, torch.Tensor] = {}
-
-    def _hook(_module, _inputs, output):
-        tensor = output[0] if isinstance(output, tuple) else output
-        captured["h"] = tensor.detach()
-
-    handle = model.norm_f.register_forward_hook(_hook)
-    try:
-        generator = torch.Generator().manual_seed(99)
-        ids = torch.randint(0, vocab, (1, seq), generator=generator)
-        third = max(1, seq // 3)
-        model.eval()
-        with torch.no_grad():
-            model(ids)  # long: prefix followed by a suffix
-            long_prefix_state = captured["h"][:, third - 1]
-            model(ids[:, :third])  # short: the prefix alone
-            short_prefix_state = captured["h"][:, third - 1]
-    except Exception:
-        return None, 0
-    finally:
-        handle.remove()
-
-    similarity = float(
-        torch.nn.functional.cosine_similarity(
-            long_prefix_state.flatten(), short_prefix_state.flatten(), dim=-1
-        )
-    )
-    return similarity, int(short_prefix_state.numel())
-
-
-def _measure_component_breakdown(
-    model: FeatherV2Model, runs: int = 3
-) -> dict[str, float]:
-    """Time each of the seven sublayers by actually running that sublayer.
-
-    The previous version called ``model.forward(x)`` once per component name,
-    timing the entire model seven times, then normalised the seven identical
-    numbers to percentages that always sum to 100. The "breakdown" was the same
-    measurement relabelled; it could not have shown anything else.
-    """
-    block = model.blocks[0]
-    pairs = [
-        ("sensory", block.sensory),
-        ("liquid_memory", block.liquid),
-        ("hyperdimensional", block.hyper),
-        ("knowledge_vault", block.vault),
-        ("cognitive_weaver", block.weaver),
-        ("homeostasis", block.governor),
-        ("generative_evolution", block.evolution),
-    ]
-    model.eval()
-    times: dict[str, float] = {}
-    with torch.no_grad():
-        for name, module in pairs:
-            probe = torch.randn(1, 8, int(model.config["dim"]))
-            module(probe)  # warmup
-            samples = []
-            for _ in range(runs):
-                start = time.perf_counter()
-                module(probe)
-                samples.append(time.perf_counter() - start)
-            times[name] = _median(samples)
-    total = sum(times.values())
-    if total <= 0:
-        return {name: 0.0 for name in times}
-    return {name: value / total * 100.0 for name, value in times.items()}
-
-
-def _measure_energy(model: FeatherV2Model, text: str) -> tuple[float | None, dict]:
-    """Energy for one forward plus a short generation, via codecarbon.
-
-    The previous version, on any exception at all, returned
-    ``tokens * 3.7e-15 * 128 * 512``. That constant appears nowhere else in the
-    repository, was not derived from any measurement, and was reported as if it
-    were one. It is now ``None``.
-    """
-    try:
-        from codecarbon import EmissionsTracker
-    except ImportError:
-        cprint("  codecarbon unavailable; energy not measured", _YELLOW)
-        return None, {"reason": "codecarbon not installed"}
-
-    try:
-        model.eval()
-        vocab = int(model.config["vocab"])
-        seq = min(32, int(model.config["seq_len"]))
-        ids = torch.randint(0, vocab, (1, seq), dtype=torch.long)
-        tracker = EmissionsTracker(log_level="error", save_to_file=False)
-        tracker.start()
-        try:
-            with torch.no_grad():
-                model(ids)
-                model.generate(ids, max_new_tokens=16, greedy=True)
-        finally:
-            tracker.stop()
-        emissions_kg = tracker.final_emissions
-        if emissions_kg is None:
-            return None, {"reason": "tracker produced no emissions reading"}
-        return float(emissions_kg) * 3.6e9, {"co2_kg": float(emissions_kg)}
-    except Exception as exc:  # noqa: BLE001
-        cprint(f"  energy measurement failed: {exc}", _YELLOW)
-        return None, {"reason": str(exc)}
-
-
-def _count_parameters(model: FeatherV2Model) -> int:
-    """The model's own deduplicated parameter count.
-
-    The previous version walked ``dir(component)`` looking for ``np.ndarray``
-    attributes and added ``_logit_projection.size``. That counted whatever
-    happened to be cached on each object, not the model's parameters, so it was
-    unrelated to model size and drifted whenever an attribute was added.
-    """
-    return model.count_parameters()
+    result = model.state_stability(seq)
+    return result.get("similarity"), int(result.get("hidden_dim") or 0)
 
 
 # ---------------------------------------------------------------------------

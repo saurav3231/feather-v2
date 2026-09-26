@@ -1,7 +1,17 @@
-"""Feather v2 — base component.
+"""Feather v2 — optional base helper.
 
-Every component inherits BaseComponent for common logic: configuration,
-adaptive hardware kernel, energy accounting and cache sizing.
+``BaseComponent`` provides small shared helpers: adaptive kernel lookup, energy
+accounting, op counting, cache reporting and a cosine-similarity shortcut.
+
+**The shipped components do not inherit from it.** ``SensoryEncoder``,
+``LiquidMemory``, ``HyperDimensionalMemory``, ``TTExpert``, ``KnowledgeVault``,
+``CognitiveWeaver``, ``HomeostasisGovernor`` and ``GenerativeEvolution`` are all
+``torch.nn.Module`` subclasses and get their behaviour from ``nn_math`` and
+``nn.Module``. An earlier version of this docstring claimed every component
+inherited ``BaseComponent``; none of them do.
+
+It is kept because it is a usable mixin for new non-``nn.Module`` code, and it is
+importable, but nothing in the model depends on it.
 """
 
 from __future__ import annotations

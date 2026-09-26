@@ -41,43 +41,96 @@ def hybrid_adaptive_tokenizer(
     vocab_size: int = 8256,
     hardware_ram_gb: float = 31.0,
 ) -> tuple[np.ndarray, dict]:
-    """Byte-level + BPE hybrid tokenizer with p-adic grouping and fractional weighting.
+    """Byte-level tokenizer with hashed 4-byte grouping.
 
-    Returns (token_ids, info_dict).
+    Returns ``(token_ids, info)``. Every returned id is guaranteed to satisfy
+    ``0 <= id < vocab_size``, so the result can be fed straight to an embedding
+    of size ``vocab_size``.
+
+    Ids ``0..255`` are reserved for single bytes. Longer runs are packed into a
+    32-bit value and folded into the remaining vocabulary with a modulo, which
+    keeps the 4:1 grouping but is **lossy**: distinct 4-byte runs can land on the
+    same id. The collision count is reported in ``info`` rather than hidden, and
+    ``info["lossy"]`` records whether any collapsing happened.
+
+    The previous implementation packed 4 bytes as ``256 + (b0 << 12) | ...``,
+    which needs 32 bits and therefore produced ids up to roughly 1,044,736 for a
+    ``vocab_size`` of 8256. Every id it produced was out of range for the
+    embedding, so it could not tokenize real text for any of the shipped 8256-token
+    configs. That is fixed here.
     """
     byte_tokens = np.frombuffer(text.encode("utf-8"), dtype=np.uint8).astype(np.int64)
-    if vocab_size >= 8192:
-        merged = []
+    limit = max(1, int(vocab_size))
+    span = max(1, limit - 256)
+    lossless = True
+    collisions = 0
+
+    if limit >= 8192 and byte_tokens.size > 1:
+        merged: list[int] = []
+        owner: dict[int, int] = {}  # token id -> packed value that claimed it
+        packed_seen: set[int] = set()
+        repeats = 0
+        collisions = 0
+        b = byte_tokens
         i = 0
-        while i < len(byte_tokens):
-            if i + 3 < len(byte_tokens):
-                merged.append(
-                    int(
-                        256 + (byte_tokens[i] << 12)
-                        | (byte_tokens[i + 1] << 8)
-                        | (byte_tokens[i + 2] << 4)
-                        | byte_tokens[i + 3]
-                    )
+        n = b.size
+        while i < n:
+            if i + 3 < n:
+                packed = (
+                    (int(b[i]) << 24)
+                    | (int(b[i + 1]) << 16)
+                    | (int(b[i + 2]) << 8)
+                    | int(b[i + 3])
                 )
                 i += 4
-            elif i + 1 < len(byte_tokens):
-                merged.append(int(256 + (byte_tokens[i] << 4) | byte_tokens[i + 1]))
+            elif i + 1 < n:
+                packed = (int(b[i]) << 8) | int(b[i + 1])
                 i += 2
             else:
-                merged.append(int(byte_tokens[i]))
+                packed = int(b[i])
                 i += 1
+            token = 256 + (packed % span) if limit > 256 else packed % limit
+            if packed in packed_seen:
+                # The same bytes again. Mapping to the same id is the point,
+                # not a collision.
+                repeats += 1
+            else:
+                packed_seen.add(packed)
+                previous = owner.get(token)
+                if previous is not None and previous != packed:
+                    # Two different byte runs landed on one id: real information loss.
+                    collisions += 1
+                else:
+                    owner[token] = packed
+            merged.append(token)
         token_ids = np.array(merged, dtype=np.int64)
+        lossless = collisions == 0
     else:
         token_ids = byte_tokens
+        repeats = 0
+        collisions = 0
+
+    # Safety net: never hand back an id the embedding cannot accept.
+    out_of_range = int((token_ids >= limit).sum())
+    if out_of_range:
+        token_ids = np.clip(token_ids, 0, limit - 1)
+
     K = 32 if hardware_ram_gb < 16.0 else 64
-    weights = _fractional_weights(alpha=0.7, k=K)
+    _weights = _fractional_weights(alpha=0.7, k=K)
     info = {
-        "vocab_size": vocab_size,
+        "vocab_size": limit,
         "num_tokens": int(token_ids.size),
         "K_recent": K,
         "compression_ratio": max(
             1.0, len(text.encode("utf-8")) / max(1, token_ids.size)
         ),
+        "max_id": int(token_ids.max()) if token_ids.size else 0,
+        "distinct_ids": int(np.unique(token_ids).size) if token_ids.size else 0,
+        "distinct_byte_runs": len(packed_seen) if limit >= 8192 else 0,
+        "repeated_byte_runs": repeats,
+        "group_collisions": collisions,
+        "lossy": not lossless,
+        "out_of_range_clipped": out_of_range,
     }
     return token_ids, info
 

@@ -363,14 +363,24 @@ class FeatherV2Model(nn.Module):
         return f"{millions:.2f}M"
 
     def num_bytes(self, dtype: torch.dtype = torch.float32) -> int:
-        """Serialized weight size for ``dtype``, counting shared tensors once."""
+        """Serialized weight size for ``dtype``, counting shared tensors once.
+
+        ``dtype`` is honoured: passing ``torch.float16`` returns half the float32
+        size. The previous implementation always used each parameter's current
+        ``element_size()`` and ignored the argument, so ``num_bytes(torch.float16)``
+        and ``num_bytes()`` returned the same number.
+
+        This is an arithmetic size, not a file. A real float16 checkpoint has not
+        been produced or measured here.
+        """
         seen: set[int] = set()
+        itemsize = torch.empty(0, dtype=dtype).element_size()
         total = 0
         for param in self.parameters():
             if id(param) in seen:
                 continue
             seen.add(id(param))
-            total += param.numel() * param.element_size()
+            total += param.numel() * itemsize
         return total
 
     @torch.no_grad()
@@ -476,4 +486,72 @@ class FeatherV2Model(nn.Module):
             "tokens_per_second": tokens / median if median > 0 else 0.0,
             "best_seconds": samples[0],
             "worst_seconds": samples[-1],
+        }
+
+    @torch.no_grad()
+    def state_stability(self, seq_len: int | None = None) -> dict[str, Any]:
+        """Measure how much a suffix perturbs an earlier representation.
+
+        The same token prefix is encoded twice: once on its own, and once as the
+        start of a longer sequence. The hidden state at the *same position* of the
+        prefix is captured in both cases via a forward hook, and the cosine
+        similarity between them is returned.
+
+        This is deliberately not called recall, and it is not a long-context
+        measurement. It says how similar one position's representation is when
+        later tokens are present versus absent.
+
+        Comparing final *logits* instead would mix a vocab-wide vector into a
+        representation-similarity claim, and comparing the last position of a short
+        prefix against the last position of a long sequence would compare two
+        different positions. An earlier version of this check did both and
+        reported a vocab width as if it were a representation width.
+
+        Returns ``{"similarity": None, "hidden_dim": 0}`` when no comparable
+        hidden state can be captured.
+        """
+        empty: dict[str, Any] = {"similarity": None, "hidden_dim": 0}
+        try:
+            vocab = int(self.config["vocab"])
+            seq = min(
+                int(seq_len or self.config["seq_len"]), int(self.config["seq_len"])
+            )
+            if seq < 4:
+                return empty
+        except Exception:
+            return empty
+
+        captured: dict[str, Tensor] = {}
+
+        def _hook(_module, _inputs, output):
+            tensor = output[0] if isinstance(output, tuple) else output
+            captured["h"] = tensor.detach()
+
+        was_training = self.training
+        handle = self.norm_f.register_forward_hook(_hook)
+        try:
+            generator = torch.Generator().manual_seed(99)
+            ids = torch.randint(0, vocab, (1, seq), generator=generator)
+            third = max(1, seq // 3)
+            self.eval()
+            self(ids)  # long: the prefix followed by a suffix
+            long_state = captured["h"][:, third - 1]
+            self(ids[:, :third])  # short: the prefix alone
+            short_state = captured["h"][:, third - 1]
+        except Exception:
+            return empty
+        finally:
+            handle.remove()
+            if was_training:
+                self.train()
+
+        similarity = float(
+            F.cosine_similarity(
+                long_state.flatten(), short_state.flatten(), dim=-1
+            ).mean()
+        )
+        return {
+            "similarity": similarity,
+            "hidden_dim": int(short_state.shape[-1]),
+            "prefix_positions": third,
         }
