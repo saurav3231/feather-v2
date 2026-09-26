@@ -934,6 +934,9 @@ def train(args: argparse.Namespace) -> int:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
+        # Recorded so the held-out evaluation can refuse to score a slice of the
+        # stream that training has already consumed.
+        model._trained_steps = step
         step_elapsed = time.perf_counter() - step_start
 
         step_times.append(step_elapsed)
@@ -1074,6 +1077,23 @@ def train(args: argparse.Namespace) -> int:
         )
     final_stability = rows[-1].get("state_stability") if rows else None
     print(f"state stability:   {_fmt(final_stability, '.5f')} (not a recall score)")
+    print(
+        "                   ~1.0 is expected for a causal model: an earlier position\n"
+        "                   cannot see later tokens. It is not a measure of quality."
+    )
+
+    held_out = evaluate_held_out(model, stream, tokens_per_step, args.seed)
+    if held_out is not None:
+        print(
+            f"held-out (last 5% of corpus, never trained on):\n"
+            f"  loss         {held_out['loss']:.4f} nats/token\n"
+            f"  perplexity   {held_out['perplexity']:.1f}\n"
+            f"  top-1 acc    {100 * held_out['top1']:.2f}%\n"
+            f"  top-10 acc   {100 * held_out['top10']:.2f}%\n"
+            f"  unigram flr  {held_out['unigram_floor']:.4f} nats/token\n"
+            f"  vs unigram   {held_out['gain_vs_unigram']:+.4f} nats "
+            f"({'uses context' if held_out['uses_context'] else 'no context gain'})"
+        )
 
     print("\nAuthenticity gates (these test genuineness, not target values):")
     for gate in gates:
@@ -1124,6 +1144,7 @@ def train(args: argparse.Namespace) -> int:
             "energy_total_j": total_energy,
             "energy_source": "codecarbon" if energy.available else None,
             "state_stability_final": final_stability,
+            "held_out": held_out,
             "gates_passed": sum(1 for g in gates if g["ok"] is True),
             "gates_failed": len(failed),
             "gates_unjudged": len(unjudged),
@@ -1206,6 +1227,82 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out", default="benchmark_20M_simple.json")
     return parser
+
+
+def evaluate_held_out(
+    model: Any,
+    stream: np.ndarray,
+    tokens_per_step: int,
+    seed: int,
+    holdout_fraction: float = 0.05,
+) -> dict[str, Any] | None:
+    """Score the model on tokens it never trained on.
+
+    ``state_stability`` answers "does an earlier position change when later
+    tokens appear", which is a causality check and sits at 1.0 for any correct
+    causal model. It says nothing about whether the model predicts anything
+    useful. This measures that instead, and reports it next to the unigram
+    entropy floor of the same held-out tokens, because a model that only learns
+    token frequencies cannot beat that floor and the comparison is the whole
+    point.
+
+    The held-out slice is taken from the far end of the stream, which training
+    never reaches unless the run is long enough to wrap, in which case the result
+    is reported as skipped rather than quietly contaminated.
+    """
+    trained_tokens = tokens_per_step * max(1, int(getattr(model, "_trained_steps", 0)))
+    holdout = int(stream.size * holdout_fraction)
+    if holdout < tokens_per_step or stream.size - holdout <= trained_tokens:
+        return None
+
+    tail = stream[-holdout:].astype(np.int64)
+    seq = min(512, tail.size - 1)
+    if seq < 8:
+        return None
+
+    was_training = model.training
+    model.eval()
+    try:
+        generator = torch.Generator().manual_seed(seed + 1)
+        correct1 = correct10 = total = 0
+        weighted = 0.0
+        with torch.no_grad():
+            for start in range(0, tail.size - seq - 1, seq):
+                chunk = torch.from_numpy(tail[start : start + seq + 1]).unsqueeze(0)
+                x, y = chunk[:, :-1], chunk[:, 1:]
+                logits = model(x)
+                if not torch.is_tensor(logits):
+                    logits = logits[0] if isinstance(logits, tuple) else logits
+                logits = logits.float()
+                weighted += float(
+                    torch.nn.functional.cross_entropy(
+                        logits.reshape(-1, logits.shape[-1]),
+                        y.reshape(-1),
+                        reduction="sum",
+                    )
+                )
+                top = logits.topk(10, dim=-1).indices
+                match = top.eq(y.unsqueeze(-1))
+                correct1 += int(match[..., 0].sum())
+                correct10 += int(match.any(dim=-1).sum())
+                total += int(y.numel())
+        if total == 0:
+            return None
+        loss = weighted / total
+    finally:
+        model.train(was_training)
+
+    return {
+        "loss": loss,
+        "perplexity": float(np.exp(loss)),
+        "top1": correct1 / total,
+        "top10": correct10 / total,
+        "tokens": total,
+        "unigram_floor": unigram_floor(tail),
+        # Positive means the model beats pure token frequencies on unseen text.
+        "gain_vs_unigram": unigram_floor(tail) - loss,
+        "uses_context": (unigram_floor(tail) - loss) > 0.02,
+    }
 
 
 def main() -> int:
