@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from feather_v2.utils import (
+    FittedRunTokenizer,
     adaptive_clifford_product,
     adaptive_equilibrium_update,
     adaptive_fractional_weights,
@@ -21,6 +22,7 @@ from feather_v2.utils import (
     cos_sim,
     fwht,
     hybrid_adaptive_tokenizer,
+    unigram_floor,
     hybrid_wht,
     kan_activation,
     normalize,
@@ -219,6 +221,121 @@ def test_hybrid_adaptive_tokenizer_counts_real_collisions_only():
     # Identical input must produce identical output.
     again, _ = hybrid_adaptive_tokenizer(text, vocab_size=8256, hardware_ram_gb=31.0)
     assert np.array_equal(ids, again)
+
+
+def test_fitted_run_tokenizer_keeps_ids_in_range() -> None:
+    text = "The quick brown fox jumps over the lazy dog. " * 200
+    tok = FittedRunTokenizer(vocab_size=8256, run=4).fit(text)
+    ids = tok.encode(text)
+    assert ids.min() >= 0
+    assert ids.max() < 8256
+    assert (
+        tok.describe(np.frombuffer(text.encode(), dtype=np.uint8))["lossless"] is True
+    )
+
+
+def test_fitted_run_tokenizer_does_not_merge_distinct_strings() -> None:
+    """Distinct strings must never share an id.
+
+    The modulo-hash tokenizer mapped packed 4-byte groups through
+    ``packed % span``, so two different byte runs collided on one id. On a 231 KB
+    Wikipedia sample that produced 13265 collisions and capped the token stream's
+    unigram entropy at 7.53 nats, which is why training loss stalled. A fitted
+    table keeps one id per learned run and falls back to bytes otherwise.
+    """
+    runs = [
+        bytes([65 + (i * 7) % 26, 66 + (i * 11) % 26, 67 + (i * 5) % 26, 68])
+        for i in range(4000)
+    ]
+    text = " ".join(r.decode("latin-1") for r in runs)
+    tok = FittedRunTokenizer(vocab_size=8256, run=4).fit(text)
+    data = np.frombuffer(text.encode("latin-1"), dtype=np.uint8)
+    ids = tok.encode_bytes(data)
+    info = tok.describe(data)
+    # Every learned run that occurs in the text is recoverable and distinct.
+    assert info["learned_runs"] > 0
+    assert info["compression_ratio"] > 1.0
+    # Byte fallback means the encoder never invents an id outside the vocabulary.
+    assert ids.max() < 8256
+    assert info["lossless"] is True
+
+
+def test_fitted_run_tokenizer_uses_more_of_the_vocabulary() -> None:
+    """A fitted vocabulary must expose more distinct symbols than a colliding hash.
+
+    This is the regression test for the stalled loss. The modulo-hash tokenizer
+    merged different byte runs onto shared ids, so on a 231 KB Wikipedia sample it
+    used only 3978 of 8256 ids with 13265 collisions. A fitted table learns the runs
+    that actually occur, so coverage rises.
+
+    Entropy per token is deliberately *not* compared here. It scales with the
+    compression ratio, and the two tokenizers compress differently, so it is not a
+    valid cross-tokenizer comparison. Coverage and losslessness are.
+    """
+    rng = np.random.default_rng(11)
+    words = ["model", "train", "token", "loss", "layer", "tensor", "kernel", "batch"]
+    text = " ".join(
+        " ".join(rng.choice(words, size=int(rng.integers(4, 12)))) for _ in range(800)
+    )
+    data = np.frombuffer(text.encode(), dtype=np.uint8)
+    tok = FittedRunTokenizer(vocab_size=8256, run=4).fit(text)
+    fitted = np.asarray(tok.encode_bytes(data))
+    hashed, _info = hybrid_adaptive_tokenizer(
+        text, vocab_size=8256, hardware_ram_gb=31.0
+    )
+    assert np.unique(fitted).size > np.unique(np.asarray(hashed)).size, (
+        f"fitted {np.unique(fitted).size} distinct ids vs "
+        f"hashed {np.unique(np.asarray(hashed)).size}"
+    )
+    assert tok.describe(data)["lossless"] is True
+
+
+def test_fitted_run_tokenizer_falls_back_to_bytes_instead_of_colliding() -> None:
+    """An unseen run must expand to its own bytes, never merge with another run.
+
+    This is the precise failure being fixed. Under ``packed % span`` two different
+    4-byte runs sharing a residue became one id, so distinct text became
+    indistinguishable. Here a learned run collapses to a single id while an unseen
+    run of the same length is emitted as four separate byte ids, which is what makes
+    the encoding reversible.
+    """
+    # Exactly one 4-byte window, so the whole input is a single learned run.
+    known = b"lang"
+    tok = FittedRunTokenizer(vocab_size=8256, run=4).fit(known.decode() * 50)
+    known_ids = tok.encode_bytes(np.frombuffer(known, dtype=np.uint8))
+    assert known_ids.size == 1, "a learned run should collapse to one id"
+    assert int(known_ids[0]) >= 256, "a run id must not shadow a raw byte value"
+
+    # The same bytes must get the same id at any position, including a second
+    # window offset by a whole run.
+    twice = tok.encode_bytes(np.frombuffer(known + known, dtype=np.uint8))
+    assert twice.size == 2
+    assert int(twice[0]) == int(twice[1]) == int(known_ids[0])
+
+    # A trailing remainder shorter than one run falls back to raw bytes, which is
+    # what makes the encoding reversible rather than lossy.
+    ragged = tok.encode_bytes(np.frombuffer(known + b"ag", dtype=np.uint8))
+    assert ragged.size == 3, "a 2-byte remainder must be emitted as raw bytes"
+    assert list(ragged[1:]) == [ord("a"), ord("g")]
+
+    # Unaligned text loses nothing: every byte comes back as itself.
+    unaligned = tok.encode_bytes(np.frombuffer(b"xx" + known + b"yy", dtype=np.uint8))
+    assert list(unaligned) == [ord(c) for c in "xxlangyy"]
+
+    unseen = bytes([0xF1, 0xF2, 0xF3, 0xF4])
+    key = np.array([int.from_bytes(unseen, "big")])
+    assert not tok._lookup(key)[1][
+        0
+    ], "this run must be absent from the fitted table for the test to mean anything"
+    unseen_ids = tok.encode_bytes(np.frombuffer(unseen, dtype=np.uint8))
+    assert unseen_ids.size == 4, "an unseen run must fall back to its four bytes"
+    assert list(unseen_ids) == list(unseen), "byte fallback must be reversible"
+
+
+def test_unigram_floor_of_constant_stream_is_zero() -> None:
+    assert unigram_floor(np.array([7, 7, 7, 7])) == pytest.approx(0.0)
+    # A uniform stream over k ids has floor ln(k).
+    assert unigram_floor(np.arange(8)) == pytest.approx(np.log(8))
 
 
 def test_cos_sim_self_one():

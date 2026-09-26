@@ -98,7 +98,11 @@ if str(ROOT / "src") not in sys.path:
 
 from feather_v2 import FeatherV2Model  # noqa: E402
 from feather_v2.hardware import detect_cpu_features, get_best_kernel  # noqa: E402
-from feather_v2.utils import hybrid_adaptive_tokenizer  # noqa: E402
+from feather_v2.utils import (  # noqa: E402
+    FittedRunTokenizer,
+    hybrid_adaptive_tokenizer,
+    unigram_floor,
+)
 
 # Corpora are tried in order. Each entry is (label, path, config, split, take).
 #
@@ -236,6 +240,7 @@ def build_token_stream(
     """Tokenize real text until ``target_tokens`` ids are collected."""
     attempts: list[dict[str, Any]] = []
     stream = np.zeros(0, dtype=np.int64)
+    corpus_info: dict[str, Any] = {}
 
     for spec in DATASETS:
         label = spec[0]
@@ -245,16 +250,25 @@ def build_token_stream(
         collected: list[np.ndarray] = []
         total = 0
         try:
+            pieces: list[str] = []
             for _chunk_label, text in _stream_text(spec):
                 if total >= target_tokens:
                     break
-                ids, _info = hybrid_adaptive_tokenizer(
-                    text, vocab_size, hardware_ram_gb
-                )
-                if ids is None or len(ids) == 0:
-                    continue
-                collected.append(np.asarray(ids, dtype=np.int64))
-                total += len(ids)
+                pieces.append(text)
+                total += len(text)
+            if not pieces:
+                raise ValueError("no text produced tokens")
+            # Fit the run vocabulary on this corpus, then encode. The earlier
+            # modulo-hash tokenizer collided 13265 distinct byte runs onto shared
+            # ids, which capped learnable signal at 7.53 nats and stalled loss.
+            tokenizer = FittedRunTokenizer(vocab_size=vocab_size, run=4).fit(
+                "".join(pieces)
+            )
+            ids = tokenizer.encode_bytes(
+                np.frombuffer("".join(pieces).encode("utf-8", "ignore"), dtype=np.uint8)
+            )
+            if ids is None or len(ids) == 0:
+                raise ValueError("tokenizer produced no ids")
             if total == 0:
                 raise ValueError("no text produced tokens")
         except Exception as exc:  # noqa: BLE001
@@ -269,6 +283,14 @@ def build_token_stream(
                 print(f"    unavailable: {type(exc).__name__}", flush=True)
             continue
 
+        corpus_info = tokenizer.describe(
+            np.frombuffer("".join(pieces).encode("utf-8", "ignore"), dtype=np.uint8)
+        )
+        corpus_info["unigram_floor_nats"] = unigram_floor(ids)
+        corpus_info["collision_note"] = (
+            "no collisions: unseen runs fall back to raw bytes, so distinct "
+            "strings never share an id"
+        )
         attempts.append({"dataset": label, "ok": True, "tokens": int(total)})
         if verbose:
             print(
@@ -276,7 +298,7 @@ def build_token_stream(
                 f"{time.perf_counter() - started:.1f}s",
                 flush=True,
             )
-        stream = np.concatenate(collected) if collected else np.zeros(0, np.int64)
+        stream = np.asarray(ids, dtype=np.int64)
         break
 
     used_fallback = False
@@ -284,16 +306,17 @@ def build_token_stream(
         used_fallback = True
         if verbose:
             print("  falling back to text in this repository (NOT a corpus)")
-        collected = []
-        total = 0
-        for _label, text in load_local_text():
-            ids, _info = hybrid_adaptive_tokenizer(text, vocab_size, hardware_ram_gb)
-            if ids is None or len(ids) == 0:
-                continue
-            collected.append(np.asarray(ids, dtype=np.int64))
-            total += len(ids)
-        if collected:
-            stream = np.concatenate(collected)
+        pieces = [text for _label, text in load_local_text()]
+        if pieces:
+            tokenizer = FittedRunTokenizer(vocab_size=vocab_size, run=4).fit(
+                "".join(pieces)
+            )
+            raw = np.frombuffer(
+                "".join(pieces).encode("utf-8", "ignore"), dtype=np.uint8
+            )
+            stream = tokenizer.encode_bytes(raw)
+            corpus_info = tokenizer.describe(raw)
+            corpus_info["unigram_floor_nats"] = unigram_floor(stream)
 
     info = {
         "sources": attempts,
@@ -301,6 +324,8 @@ def build_token_stream(
         "tokens": int(stream.size),
         "target_tokens": int(target_tokens),
     }
+    if corpus_info:
+        info["tokenizer"] = corpus_info
     if stream.size == 0:
         raise SystemExit(
             "No corpus could be loaded and no local fallback was allowed.\n"
@@ -538,6 +563,27 @@ def describe_run(
 # ---------------------------------------------------------------------------
 # Authenticity gates
 # ---------------------------------------------------------------------------
+def _snapshot_sample(model: torch.nn.Module) -> set[str]:
+    """Pick a deterministic subset of parameters for the weight-update gate.
+
+    The gate asserts that training actually changed the weights. Comparing every
+    tensor would need a second full copy of the model, so this takes a spread of
+    names instead: anything containing ``embed``, ``norm`` or ``head``, plus the
+    largest remaining tensor per top-level module.
+    """
+    names = [n for n, _ in model.named_parameters()]
+    chosen = {n for n in names if "embed" in n or "norm" in n or "head" in n}
+    largest: dict[str, tuple[int, str]] = {}
+    for name, param in model.named_parameters():
+        top = name.split(".")[0]
+        if name in chosen:
+            continue
+        if top not in largest or param.numel() > largest[top][0]:
+            largest[top] = (param.numel(), name)
+    chosen.update(name for _, name in largest.values())
+    return chosen
+
+
 def run_gates(
     model: torch.nn.Module,
     init_snapshot: dict[str, torch.Tensor],
@@ -629,10 +675,12 @@ def run_gates(
     )
     if changed:
         mean_delta = statistics.fmean(changed)
+        total_tensors = sum(1 for _ in model.named_parameters())
         add(
             "weights_updated_by_training",
             mean_delta > 0.0,
-            f"mean |param - init| = {mean_delta:.3e} over {len(changed)} tensors "
+            f"mean |param - init| = {mean_delta:.3e} over a {len(changed)}-tensor "
+            f"sample of {total_tensors} "
             "(0.0 would mean the optimizer never applied an update)",
         )
     else:
@@ -796,9 +844,22 @@ def train(args: argparse.Namespace) -> int:
     if not energy.available:
         print(f"energy: not measured ({energy.reason})")
 
+    # A full clone of every parameter costs one extra copy of the weights, which is
+    # 83 MB for this config and is pure overhead: the update gate only needs to know
+    # whether tensors moved. Sample a deterministic subset instead, covering the
+    # embedding, every block, and the head.
+    snapshot_names = _snapshot_sample(model)
     init_snapshot = {
-        name: param.detach().clone() for name, param in model.named_parameters()
+        name: param.detach().clone()
+        for name, param in model.named_parameters()
+        if name in snapshot_names
     }
+    print(
+        f"snapshot: {len(init_snapshot)} of "
+        f"{sum(1 for _ in model.named_parameters())} tensors "
+        f"({sum(p.numel() for p in init_snapshot.values()) * 4 / 1e6:.1f} MB "
+        "instead of a full copy)"
+    )
 
     batches = make_batches(stream, batch_size, seq_len, args.steps, int(config["seed"]))
     tokens_per_step = batch_size * seq_len
