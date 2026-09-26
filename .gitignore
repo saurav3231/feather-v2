@@ -23,5 +23,11 @@ emissions.csv
 !configs/*.json
 !benchmark_report.json
 !outputs/*.json
-!docs/images/*.png
-!docs/*.png
+
+# docs/images/*.png is deliberately NOT un-ignored.
+#
+# A short smoke run writes all five baseline figures, so a blanket negation let a
+# 4-step plot be committed next to a claim of 600 steps. A plot is only evidence
+# for the run that produced it, so figures stay ignored until a full run's JSON is
+# committed, and are then added deliberately with `git add -f` after checking the
+# image against its JSON.

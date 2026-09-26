@@ -15,16 +15,38 @@ happened. Where a value cannot be measured, for example energy when
 ``codecarbon`` is not installed, the field is ``null`` and the table prints
 ``not measured`` rather than an estimate.
 
-A note on the "20M" in the output names
----------------------------------------
-The output filenames keep the ``20M_simple`` label that was requested, but the
-shipped configuration ``configs/feather_23M_simple.json`` measures 23.12M
-parameters, not 20M. The requested architecture (dim 384, hv_dim 6144,
-64 experts, top_k 2) lands on 23.12M at ``n_blocks=2``; the same config at
-``n_blocks=8`` is 82.36M. A configuration that genuinely measures near 20.0M
-needs ``dim=352``, which measures 20.70M. The config file is named for its real
-size, and every artifact records the measured parameter count, so the filename
-cannot imply a size the model does not have.
+A note on the size
+------------------
+``configs/feather_20M_simple.json`` measures 20,696,188 parameters, which is
+20.70M against a 20M target. The originally specified ``dim=384`` measures
+23.12M at ``n_blocks=2`` and 82.36M at ``n_blocks=8``, so ``dim=352`` was chosen
+to land near the target. Both numbers are real sums over ``p.numel()``; verify
+either with::
+
+    python -m feather_v2.model --config configs/feather_20M_simple.json --count-params
+
+A note on speed
+---------------
+Throughput is dominated by tokens per step, so the defaults are the small,
+faster configuration rather than the large one:
+
+===============  ===========  ==============  ====================
+batch x seq      tokens/step  measured s/step  600 steps
+===============  ===========  ==============  ====================
+2 x 128          256          4.8             48 min (projected)
+8 x 512          4096         72              12 h (projected)
+===============  ===========  ==============  ====================
+
+The per-step figures are real measurements from a 4.8 s/step observation on a
+2-core/4-thread laptop at batch 2 x seq 128, scaled by token count. The 600-step
+totals are arithmetic projections, not completed runs. A 10-20 minute run for
+600 steps at batch 8 x seq 512 was claimed in an earlier specification and is not
+achievable on this hardware: it would require roughly 115 tok/s sustained, about
+2.3x the measured rate, before any accounting for the 4096 tokens per step.
+
+``--time-budget-hours`` guards against this. After three timed steps the script
+projects the finish time from the measured rate and stops with a clear message if
+the projection exceeds the budget.
 
 Two things this script deliberately does not claim, because they are not measured
 here and were fabricated in earlier revisions of this project:
@@ -1059,14 +1081,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default=str(ROOT / "configs" / "feather_23M_simple.json"),
+        default=str(ROOT / "configs" / "feather_20M_simple.json"),
         help="model config to train",
     )
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--report-every", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
-        "--seq-len", type=int, default=0, help="0 uses the config value"
+        "--batch-size",
+        type=int,
+        default=2,
+        help="tokens per step is batch-size x seq-len; 2 x 128 = 256 tokens and "
+        "about 48 min for 600 steps, 8 x 512 = 4096 tokens and about 12 h",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=128,
+        help="128 is the quick default; 512 with --batch-size 8 is the full run",
     )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)

@@ -69,6 +69,37 @@ Pass `strict=False` to accept unknown keys deliberately.
 
 Attributes: `model.config` (the resolved dict) and `model.device`.
 
+To read a config's real size instead of trusting its filename:
+
+```python
+!python -m feather_v2.model --config configs/feather_20M_simple.json --count-params
+# 20,696,188 params (20.70M)
+# dim=352 n_blocks=2
+```
+
+### Choosing a width that hits a size target
+
+Parameter count is dominated by `blocks[i].hyper`, which is about 27% of the model
+per block at `dim=384`, and by `embed`, which scales with `vocab * dim`. `dim` is
+the effective lever. Measured counts for the quick-baseline architecture
+(`hv_dim=6144`, `vocab=8256`, `moe_experts=64`, `moe_top_k=2`):
+
+| `dim` | `n_blocks=1` | `n_blocks=2` | `n_blocks=8` |
+| --- | --- | --- | --- |
+| 352 | 11,891,614 (11.89M) | **20,696,188 (20.70M)** | 73,523,632 (73.52M) |
+| 384 | 13,241,406 (13.24M) | 23,115,132 (23.12M) | 82,357,488 (82.36M) |
+
+`configs/feather_20M_simple.json` therefore uses `dim=352`, which measures
+20,696,188 parameters against a 20M target. The originally specified `dim=384`
+measures 23,115,132 at `n_blocks=2`; that was an honest measurement, not a defect,
+and `dim=352` was chosen so the shipped config lands near its stated size.
+`n_blocks` alone cannot reach 20M from `dim=384`, because the values bracketing it
+are 13.24M at `n_blocks=1` and 23.12M at `n_blocks=2`.
+
+`hv_dim` does not affect the parameter count in this configuration: varying it
+between 4864 and 6144 leaves the total at 23,115,132. It is kept explicit because
+it still documents the intended hypernetwork width.
+
 The module hierarchy is two levels, which matters when reaching for a component:
 
 - `FeatherV2Model` children: `embed`, `pos_embed`, `blocks`, `norm_f`, `head`.

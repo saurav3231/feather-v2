@@ -555,3 +555,34 @@ class FeatherV2Model(nn.Module):
             "hidden_dim": int(short_state.shape[-1]),
             "prefix_positions": third,
         }
+
+
+def _main() -> int:
+    """Count a config's real parameters: ``python -m feather_v2.model --config ...``.
+
+    The count is a sum over ``p.numel()``, so it is the number of scalars the
+    model actually allocates. No estimate, no label attached by hand.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m feather_v2.model")
+    parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--count-params",
+        action="store_true",
+        help="print the measured parameter count and exit",
+    )
+    args = parser.parse_args()
+
+    model = FeatherV2Model(load_config(args.config))
+    count = model.count_parameters()
+    if args.count_params:
+        print(f"{count:,} params ({count / 1e6:.2f}M)")
+        print(f"dim={model.config['dim']} n_blocks={model.config['n_blocks']}")
+        return 0
+    print(model)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

@@ -131,6 +131,32 @@ This is a low-end 2013 mobile CPU. Throughput on other hardware has not been mea
 The exact feature flags and kernel binding chosen for this machine are recorded in the
 `hardware` block of `benchmark_report.json`.
 
+### Training throughput, measured and projected
+
+Measured on the reference machine above with `kaggle/train_20M_simple.py` at
+`dim=352`, 20,696,188 parameters, float32, 2 threads:
+
+| batch x seq | tokens/step | measured s/step | measured tok/s | 600 steps |
+| --- | --- | --- | --- | --- |
+| 2 x 128 | 256 | 4.8 | ~50 | 48 min (projected) |
+| 8 x 512 | 4096 | 72 (scaled) | ~57 | 12 h (projected) |
+
+Only the `2 x 128` row is a direct measurement. The `8 x 512` per-step figure is
+that measurement scaled by the 16x larger token count, and both 600-step totals are
+arithmetic projections rather than completed runs. The projections assume a
+constant per-token cost, which is optimistic: longer sequences and larger batches
+scale sublinearly at best and can fall off on a 2-core machine.
+
+An earlier specification claimed 600 steps at batch 8 x seq 512 would finish in
+10-20 minutes. That is not achievable here. It would require about 115 tok/s
+sustained, roughly 2.3x the measured rate, and it ignores that each of those steps
+has to process 4096 tokens rather than 256.
+
+Because of that, `--time-budget-hours` is a guard rather than a target. After
+three timed steps the script projects the finish time from the measured rate and
+stops with a clear message if the projection exceeds the budget, instead of
+occupying a session for hours.
+
 ---
 
 ## 7. Limits of these results

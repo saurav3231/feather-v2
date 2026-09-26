@@ -16,17 +16,29 @@ OUT = ROOT / "kaggle" / "notebook_train_20M_simple.ipynb"
 
 MD_INTRO = """# Feather v2 quick baseline - real training run
 
-Trains the shipped `configs/feather_23M_simple.json` configuration and reports only
+Trains the shipped `configs/feather_20M_simple.json` configuration and reports only
 values measured during the run.
+
+**Size:** the config measures **20,696,188 parameters (20.70M)** against a 20M
+target. The originally specified `dim=384` measures 23.12M at `n_blocks=2` and
+82.36M at `n_blocks=8`, so `dim=352` was chosen to land near the target. Verify
+either number yourself:
+
+```python
+!python -m feather_v2.model --config configs/feather_20M_simple.json --count-params
+```
 
 **What this notebook does not do:** it contains no target loss, no target
 throughput, no predicted hardware numbers, and no recall score. The metric labelled
 `StateStab` is `state_stability`, a cosine similarity between a position's hidden
 state with and without a later suffix. It is not recall and not accuracy.
 
-**Size note:** the config measures 23.12M parameters. The output filenames keep the
-requested `20M_simple` label, but a configuration that genuinely measures 20.0M
-needs `dim=352` (20.70M)."""
+**Speed:** the defaults below are the small, fast configuration. 600 steps at
+batch 2 x seq 128 is 256 tokens per step and projects to roughly 48 minutes;
+batch 8 x seq 512 is 4096 tokens per step and projects to roughly 12 hours. Those
+totals are projections from a measured 4.8 s/step at batch 2 x seq 128 on a
+2-core laptop, not completed runs. An earlier specification claimed 10-20 minutes
+for 600 steps at batch 8 x seq 512; that is not achievable on this hardware."""
 
 MD_SETUP = """## 1. Environment
 
@@ -35,12 +47,23 @@ actually measure on this machine. GPU is not used; this is a CPU baseline."""
 
 MD_RUN = """## 2. Run the training script
 
-The defaults match the requested baseline: 600 steps, batch 8, sequence length 512.
+The defaults match the quick baseline: 600 steps, batch 2, sequence length 128.
+That is 256 tokens per step and projects to roughly 48 minutes on a 2-core
+machine, which fits a Kaggle CPU session comfortably.
+
+For the full-size run, raise both together, since cost scales with
+`batch-size * seq-len`:
+
+```python
+# full run, 4096 tokens per step, projects to roughly 12 hours
+!python kaggle/train_20M_simple.py --steps 600 --batch-size 8 --seq-len 512 \\
+    --time-budget-hours 12
+```
 
 `--time-budget-hours` is a guard, not a target. The script measures the first three
 timed steps, projects the finish time, and stops early with a clear message if the
-projection exceeds the budget, so a long run cannot silently occupy a Kaggle session
-for a day. Raise or lower it to match the session you are on.
+projection exceeds the budget, so a long run cannot silently occupy a session for a
+day.
 
 The first run downloads a Wikipedia slice through `datasets`, which needs network
 access. Without it, pass `--allow-local-text` to fall back to repository text; the
@@ -83,6 +106,14 @@ from pathlib import Path
 ROOT = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path.cwd()
 print("root    :", ROOT)"""
 
+CODE_COUNT = """# Print the real parameter count instead of trusting the filename.
+count = subprocess.run(
+    [sys.executable, "-m", "feather_v2.model",
+     "--config", "configs/feather_20M_simple.json", "--count-params"],
+    cwd=ROOT, text=True, capture_output=True,
+)
+print(count.stdout or count.stderr)"""
+
 CODE_VERIFY = """# Confirm the package under test is the local one, not a stale wheel.
 import feather_v2
 
@@ -93,10 +124,12 @@ assert Path(feather_v2.__file__).resolve().is_relative_to(ROOT), (
 print("version    :", getattr(feather_v2, "__version__", "n/a"))"""
 
 CODE_RUN = """STEPS = 600
-BATCH = 8
-SEQ = 512
+BATCH = 2
+SEQ = 128
 BUDGET_HOURS = 10.0
 
+# Cost scales with BATCH * SEQ. 2 x 128 = 256 tokens/step, about 48 min projected.
+# 8 x 512 = 4096 tokens/step, about 12 h projected.
 cmd = [
     sys.executable,
     "kaggle/train_20M_simple.py",
@@ -184,6 +217,7 @@ def main() -> None:
             cell("markdown", MD_INTRO),
             cell("markdown", MD_SETUP),
             cell("code", CODE_SETUP),
+            cell("code", CODE_COUNT),
             cell("code", CODE_VERIFY),
             cell("markdown", MD_RUN),
             cell("code", CODE_RUN),
