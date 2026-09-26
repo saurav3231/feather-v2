@@ -1,7 +1,0 @@
-{
-  "name": "Feather-v2 All PCs",
-  "feather_v2_config": {
-    "adaptive_fallback": "AVX-512 -> AVX2 -> AVX -> NEON -> Scalar",
-    "scalar_fallback": "3-5 tok/s works everywhere 2010 PC no SIMD 1GB RAM"
-  }
-}

@@ -1,14 +1,12 @@
 {
-  "size_label": "20M",
-  "dim": 384,
+  "dim": 336,
   "hv_dim": 6144,
   "seq_len": 512,
   "chunk": 32,
   "tt_rank": 4,
   "moe_experts": 64,
+  "moe_top_k": 2,
   "vocab": 8256,
-  "layers": 8,
-  "batch_size": 1,
-  "precision": "int8",
+  "n_blocks": 2,
   "seed": 42
 }

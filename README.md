@@ -1,94 +1,189 @@
-# Feather v2 — The People's LLM Engine
+# Feather v2
 
-**CPU-native. Open source. Maximum output / minimum resource.**
-**13 advanced mathematics + 7 components. 40M parameters. 0.9GB RAM. 20MB GGUF.**
+A small, CPU-trainable language model built from seven components and a library of
+differentiable mathematical operators. Everything in this repository is either
+implemented and tested, or explicitly marked as not implemented.
 
----
-
-## Bicycle vs Truck
-
-**Truck (Transformer 7B GPU):** Needs $25k H100, 700W power, 14GB HBM, data center. Only rich can run.
-
-**Bicycle (Feather v2):** Runs on any CPU — i5-3337U old laptop 10-15 tok/s, Kaggle CPU 35-50 tok/s, i7-12700 60-70 tok/s beats GPU 80. 0.9GB RAM. 0.03J/1k 93x less energy. 20MB model fits mobile. Works offline airplane mode.
-
-**CPU is the people. GPU is the monopoly.**
+**Status: trainable core complete. Runtime measured. Quantised export not implemented.**
 
 ---
 
-## Performance
+## What is real here
 
-| Device | tok/s | RAM | Energy/1k |
-|--------|-------|-----|-----------|
-| i5-3337U 2C/4T 8GB | 10-15 | 0.6GB | 0.08J |
-| Kaggle CPU 2C/4T 31GB | 35-50 | 0.9GB | 0.03J |
-| i7-12700 12C | 60-70 | 0.9GB | 0.028J |
-| Agent Env 1C/2T 1.9GB | 7-12 | 0.3GB | 0.05J |
+| Area | State |
+| --- | --- |
+| Trainable model | Implemented in PyTorch, 136 tests passing |
+| Parameter counts | Measured from instantiated models |
+| Checkpointing | Real PTH save/load via `torch.save` |
+| Training loop | Real backprop; measured loss decrease |
+| Runtime benchmark | Measured on one CPU, recorded in `benchmark_report.json` |
+| GGUF / Q4_K_M export | **Not implemented.** No llama.cpp writer exists |
+| Benchmark accuracy (MMLU etc.) | **Not measured.** Not claimed |
+| GPU / BitNet comparisons | **Not measured.** Not claimed |
+
+Read [`docs/RESULTS_v2.0.md`](docs/RESULTS_v2.0.md) for the current numbers. It is
+generated from `configs/size_report.json` and `benchmark_report.json` by
+`scripts/make_report.py`, so it cannot drift from the artifacts.
 
 ---
 
-## Quick Start
+## Measured model sizes
+
+All parameters are trainable. F16 size is `parameters x 2` bytes; no quantisation is
+applied.
+
+| Config | Measured label | Parameters | F32 | F16 |
+| --- | --- | ---: | ---: | ---: |
+| `configs/feather_5M.json` | 5.06M | 5,055,020 | 19.28 MiB | 9.64 MiB |
+| `configs/feather_10M.json` | 9.60M | 9,604,412 | 36.64 MiB | 18.32 MiB |
+| `configs/feather_20M.json` | 19.52M | 19,520,508 | 74.46 MiB | 37.23 MiB |
+| `configs/feather_40M.json` | 40.34M | 40,337,084 | 153.87 MiB | 76.94 MiB |
+| `configs/feather_60M.json` | 58.37M | 58,368,714 | 222.66 MiB | 111.33 MiB |
+
+The labels in each filename are the *measured* counts, not targets. All five
+configurations fit under 128 MiB in F16. Reproduce with:
 
 ```bash
-git clone https://github.com/saurav3231/feather-v2.git
-cd feather-v2
-pip install -e .
-python -m feather_v2.hardware
-python -c "from feather_v2 import FeatherV2Model; m = FeatherV2Model(); print(m.hardware_summary())"
+python scripts/measure_sizes.py
 ```
 
 ---
 
-## 13 Mathematics
+## Quick start
 
-1. Hybrid Adaptive Tokenizer — 256+8k BPE 8256 vocab 4.5x fewer tokens
-2. Hybrid WHT — 0 mults 10x energy + tropical + fractional + p-adic + TT + Clifford
-3. Adaptive Fractional Weights — alpha 0.6-0.8 per layer + K 32-64 + beta learnable + hierarchical + liquid tau
-4. Adaptive Tropical Min — softmin tau adaptive + hierarchical 2-level + TT fusion + SparX AMX
-5. Adaptive p-adic — p 2-3 per layer + valuation learnable + hierarchical 2-level + retrieval
-6. Adaptive TT — rank 4-8 per layer + caching + SparX + AMX + tropical fusion
-7. Adaptive Rough Path — vals 13-20 per layer + path adaptive + multi-scale + fractional + p-adic
-8. Adaptive Sinkhorn — iters 5-10 per layer + std adaptive + p-adic + hierarchical + entropy
-9. Adaptive Clifford — vec 8-16 per layer + reduction 4x-8x + full + WHT + TT
-10. Adaptive Sheaf — Krum 1-3 + eps 1.0-2.0 + hierarchical + fractional + regularizer
-11. Adaptive Equilibrium — D 64-384 + free/nudge adaptive + fractional + free energy
-12. Adaptive Jacobi — draft 2/4-8/16 + threads physical cores + tree + p-adic + entropy
-13. KAN Activation — learnable spline on edges + WHT + TT + Clifford 2x fewer params
+From the root of this repository (no clone step needed):
 
----
+```bash
+pip install -e .
 
-## 7 Components
+# Report detected CPU features and the kernel binding that will be used.
+python -m feather_v2.hardware
 
-1. SensoryEncoder — Adaptive Multi-Scale Fractional p-adic Rough Path Encoder
-2. LiquidMemory — Adaptive Hierarchical Liquid Fractional Memory
-3. HyperDimensionalMemory — Hybrid WHT HRR TT Clifford 10k-D brain holographic
-4. KnowledgeVault — Adaptive Hierarchical Softmin Tropical-TT Fusion SparX AMX p-adic Entropy
-5. CognitiveWeaver — Adaptive MoD Gödel CognitiveWeaver + KAN
-6. HomeostasisGovernor — Adaptive Predictive Active Inference HomeostasisGovernor
-7. GenerativeEvolution — Adaptive Tree p-adic Entropy Sheaf Gödel GenerativeEvolution
+# Build a model and print its measured manifest.
+python -c "from feather_v2 import FeatherV2Model; import json; print(json.dumps(FeatherV2Model().describe(), indent=2, default=str))"
+```
+
+Train a small model and save a real checkpoint:
+
+```bash
+python scripts/train.py --config configs/feather_5M.json --steps 40 --pth runs/feather.pth
+```
+
+This writes the trained weights to `runs/feather.pth` and a measured manifest to
+`runs/feather.json`. Use `--config ""` for the built-in default configuration.
 
 ---
 
-## Hardware Adaptive
+## Architecture
 
-Works for ALL PCs — AVX-512 -> AVX2 -> AVX -> NEON -> Scalar fallback never fails.
-Scalar 3-5 tok/s works everywhere 2010 PC no SIMD 1GB RAM foundation 200 years.
+Seven components, each a real `nn.Module` with real parameters:
+
+1. **`SensoryEncoder`** — multi-scale fractional encoder with p-adic scale selection.
+2. **`LiquidMemory`** — hierarchical chunked gated recurrence.
+3. **`HyperDimensionalMemory`** — holographic mixing through a Walsh-Hadamard basis.
+4. **`KnowledgeVault`** — sparse mixture of TT-compressed experts with Sinkhorn-balanced
+   routing, plus a load-balancing penalty.
+5. **`CognitiveWeaver`** — Kolmogorov-Arnold feed-forward with a differentiable Godel
+   loop.
+6. **`HomeostasisGovernor`** — predictive entropy gate that rescales the residual stream.
+7. **`GenerativeEvolution`** — Jacobi-spectral refinement with a learned mutation step.
+
+Each component also instantiates `TTExpert`, a tensor-train factorised expert used by the
+mixture-of-experts path.
+
+The differentiable operator library in `src/feather_v2/nn_math.py` includes:
+fast Walsh-Hadamard transform and its inverse, tropical (softmin) matmul, fractional
+weights, p-adic weight profiles, TT factor construction and matmul, Sinkhorn projection,
+sheaf consistency projection, Clifford-style gating, rough-path signatures, Godel log
+coding, alpha dropout, and `KANLinear`.
+
+### On the "discrete" operators
+
+Several components are named after discrete mathematics but cannot be implemented
+differentiably on a GPU. Where that is the case, the repository states the relaxation
+explicitly:
+
+- **p-adic divisibility** is an exact integer descriptor, so it is **detached** from the
+  graph. It informs gating but receives no gradient.
+- **tropical / min-plus** operations use a softmin relaxation with a temperature, so they
+  are differentiable but approximate.
+- **Godel coding** uses `log`-based coding to stay finite on large messages. An earlier
+  absolute-value form produced zero gradients and was fixed.
+- **Fractional, TT, rough-path, Sinkhorn, sheaf and Clifford** operations are smooth
+  relaxations, not exact discrete algorithms.
+
+The divisibility descriptor is the only genuinely exact operator; it is also the only one
+that is not trainable end-to-end.
+
+---
+
+## Hardware adaptation
+
+`feather_v2.hardware` detects CPU features and selects a kernel binding, falling back
+without failing:
+
+```
+AVX-512 -> AVX2 -> AVX -> NEON -> scalar
+```
+
+The reference measurements in this repository were taken on an Intel i5-3337U
+(2 physical / 4 logical cores, ~3 GB RAM, AVX, no AVX2). Throughput on other CPUs will
+differ and has not been measured here.
+
+---
+
+## Export
+
+`FeatherV2Model.save_pth(path)` writes a PyTorch PTH checkpoint. There is **no GGUF
+exporter**. A file named `.gguf` will not be produced by this project, and a test
+(`tests/test_gguf.py`) fails if a `.gguf` file appears in the tree without a real
+exporter being present.
+
+The earlier `feather-v2-40M-f16.gguf` and `feather-v2-40M-Q4_K_M.gguf` files that were
+committed to this repository were not real GGUF files. They have been deleted.
+
+---
+
+## Repository layout
+
+```
+src/feather_v2/
+  nn_math.py         differentiable operator library
+  nn_components.py   the seven trainable components
+  model.py           FeatherV2Model, config loading, training/loss/generation
+  hardware.py        CPU feature detection and kernel selection
+  utils.py           NumPy reference implementations and v1 compatibility helpers
+  base.py            component base classes
+  config.py          config schema
+configs/             measured size ladder + size_report.json
+scripts/
+  train.py           real training loop
+  measure_sizes.py   parameter and byte-size measurement
+  make_report.py     generates docs/RESULTS_v2.0.md
+kaggle/
+  test_all_sizes_mega.py   real CPU benchmark across the size ladder
+docs/                architecture, design, benchmark, measured results
+paper/               paper source
+```
+
+---
+
+## Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+The suite covers the operator library, component gradients, numerical stability of the
+Godel coder, real model training, checkpoint round trips, config validation, and a guard
+against mislabelled GGUF artifacts.
 
 ---
 
 ## License
 
-MIT + No Big Tech Clause — Open Source — Breaks monopoly — Physics free, data centers not.
+MIT License plus an additional "No Big Tech Clause". See [`LICENSE`](LICENSE).
 
 ---
 
-## 200-Year Vision
-
-Substrate-agnostic: same weights run on digital CPU 2026, memristor 2030, photonic 2032, quantum HDC 2040, biological 2100, unknown physics 2226.
-
-Gödel self-rewriter immortal: model rewrites own code to improve, never degrades, functor preserving fractal self-similar.
-
----
-
-**Author:** Saurav Bhandari, Nepal Pokhara
-
-**CPU is the people. GPU is the monopoly. Feather v2 is CPU's revenge.**
+**Author:** Saurav Bhandari, Pokhara, Nepal

@@ -1,89 +1,158 @@
-# Feather v2 — Benchmark — Compare vs Transformer 7B vs BitNet vs Others
-## Bicycle vs Truck — CPU is the People, GPU is the Monopoly
+# Feather v2 — Benchmark methodology and results
 
-**Version:** 2.0.0 — 2026-09-25 — International English — Simple for Common People
+**Version:** 2.0.0
+**Author:** Saurav Bhandari, Pokhara, Nepal
 
----
-
-### 1. Goal
-
-Today's AI needs $25k graphics card, 700W power, 14GB special memory. Only big companies can afford. Feather v2 is bicycle vs truck — anyone can ride, low fuel, goes anywhere, you own it.
+The current measured numbers are in [`RESULTS_v2.0.md`](RESULTS_v2.0.md), which is
+generated from measurement artifacts. This document describes how those numbers are
+produced and what they do and do not cover.
 
 ---
 
-### 2. Hardware
+## 1. Why there is no comparison table
 
-| PC Type | Cores | SIMD | RAM | Expected tok/s |
-|---------|-------|------|-----|----------------|
-| Your PC i5-3337U 2C/4T 8GB | 2C/4T | AVX | 8GB DDR3 | 10-15 tok/s CPU-only usable 2-3x human reading |
-| Agent Env Xeon 1C/2T 1.9GB | 1C/2T | AVX512 VNNI | 1.9GB | 7-12 tok/s small dim |
-| Kaggle Xeon 2C/4T 31GB | 2C/4T | AVX2 | 31GB | 35-50 tok/s gen est 1400 bulk |
-| Modern Intel i7-12700 12C 32GB | 12C | AVX512+AMX | 32GB | 60-70 tok/s beats GPU 80 batch=1 |
+Earlier revisions of this file contained throughput, energy, and memory figures for other
+projects — including BitNet and Phi-4 — alongside figures for Feather v2. None of those
+numbers were measured. They were estimates presented in the same table and format as real
+data, which made them indistinguishable from measurements to any reader.
 
-**Adaptive fallback AVX-512->AVX2->AVX->NEON->Scalar — never fails scalar 3-5 tok/s works everywhere 2010 PC no SIMD 1GB RAM foundation 200 years**
-
----
-
-### 3. Models Compared — Professional Baselines Only
-
-| Model | Speed batch=1 | RAM | Energy/1k | Why |
-|-------|---------------|-----|-----------|-----|
-| Transformer 7B GPU | 80 tok/s RTX 3060/H100 | 14GB HBM | 2.8J | Industry standard — needs data center — baseline |
-| Feather v2 i7-12700 12C CPU | 60-70 tok/s beats GPU 80 close | 0.9GB DDR5 | 0.028J 100x saving | Our best — CPU is the people GPU is the monopoly — bicycle beats truck |
-| Feather v2 Kaggle 2C/4T 31GB | 35-50 tok/s gen est 1400 bulk | 0.9GB <30GB | 0.03J 93x saving | REAL measured WikiText 911k real — medium scale |
-| Feather v2 i5-3337U 2C/4T 8GB | 10-15 tok/s CPU-only usable 2-3x human reading | 0.6GB <8GB 5.2GB free | 0.08J 35x saving | Old laptop works offline airplane — your PC |
-| Feather v2 Agent 1C/2T 1.9GB | 7-12 tok/s small dim | 0.3GB <1.9GB 1.1GB free | 0.05J 56x saving | Even more constrained than i5-3337U — stress test max output/min resource |
-| BitNet 100B ternary -1,0,+1 | 5-7 tok/s single CPU human reading speed | 0.4GB Pi5 | 0.4J 71.9-82.2% saving | Microsoft BitNet.cpp — SOTA CPU LLM |
-| Phi-4 Mini 3.8B | 12 tok/s CPU AVX-512 | - | - | Microsoft — efficient baseline |
-| LSTM exponential 0.9^511=4e-24 | FAILS cos -0.05 long-range decay marker lost | - | - | Exponential forgets — 4e-24 decay vs Fractional power-law 3.25e20x retention |
-| Attention O(n²) GPU-friendly | 262k scores 1024KB for 512 seq | 1024KB | - | Baseline — 512²=262k vs p-adic 64²=4096 64x saving |
-
-**Edge CPU vs Edge GPU — Batch=1 Personal LLM — CPU faster due to launch overhead 0.5ms:** Research shows for batch=1 personal LLM (1 person chatting), CPU faster than GPU due to 0.5ms kernel launch + PCIe overhead that kills 12 tok/s.
+They have been removed and are not replaced with new estimates. Producing a defensible
+cross-project comparison would require running every baseline on the same machine under
+the same conditions, which this repository does not do. Until that is done, this project
+reports only its own measurements.
 
 ---
 
-### 4. Metrics
+## 2. What the benchmark measures
 
-- **Speed batch=1 personal LLM:** Tokens per second for 1 person chatting — batch=1 — personal LLM
-- **RAM GB:** Memory needed — Feather v2 0.9GB vs Transformer 14GB HBM 15x saving
-- **Energy J/1k:** Joules per 1000 tokens — Feather 0.028J vs Transformer 2.8J 100x saving
-- **Memory Saving:** Attention 512 seq 512*512=262k scores 1024KB vs p-adic 7k ops 2KB = 512x mem saving
-- **Ops Saving:** Attention 16.7M mults vs Feather 64x fewer + tropical 0 mults 123x energy
-- **Context:** Transformer 4k vs Feather p-adic 1M 4 hops 2.3e8x saving for 1M
-- **MOMR:** (Intelligence*Reliability*Context)/(Joules*Bytes*Dollars) — Transformer 1x vs Feather ~120x
-- **Cost:** H100 $25k vs $0 existing laptop — physics free data centers not — breaks monopoly
+`kaggle/test_all_sizes_mega.py` runs, for each config in the size ladder:
 
----
+| Measurement | Method |
+| --- | --- |
+| Parameter count | Sum of `numel()` over `named_parameters()` after instantiation |
+| Weight memory | `sum(p.numel() * p.element_size())` over parameters |
+| Process RAM | Sampled RSS before model load and after, via `psutil` |
+| Tokenisation rate | Wall-clock over the real tokenizer on real corpus text |
+| Forward throughput | Median of repeated timed forward passes at seq len 32, 128, 512 |
+| Bulk throughput | Timed forward passes at batch size 8 |
+| Generation rate | Timed autoregressive `generate()` calls, batch size 1 |
+| Training loss | Real backprop steps on real corpus text; first and last loss recorded |
+| Energy | `codecarbon` over one forward pass plus a short generation |
+| Per-component time | Timed forward of each component separately |
+| Context similarity | Cosine similarity between initial and final hidden states |
 
-### 5. Results Table
-
-| Model | Speed batch=1 | RAM | Energy/1k | Mem Saving | Ops Saving | Context | MOMR | Cost |
-|-------|---------------|-----|-----------|------------|------------|---------|------|------|
-| Transformer 7B GPU | 80 tok/s | 14GB HBM | 2.8J | 1x | 1x | 4k | 1x | $25k |
-| Feather v2 i7-12700 | 60-70 tok/s beats GPU 80 close | 0.9GB DDR5 | 0.028J 100x | 512x | 64x +0 mults tropical | 1M | ~120x | $0 |
-| Feather v2 Kaggle | 35-50 tok/s gen est 1400 bulk | 0.9GB <30GB | 0.03J 93x | 512x | 64x +0 mults | 1M | ~120x | $0 |
-| Feather v2 i5-3337U | 10-15 tok/s usable 2-3x human reading | 0.6GB <8GB 5.2GB free | 0.08J 35x | 512x | 256x with chunk32 | 1M | ~52x | $0 |
-| Feather v2 Agent | 7-12 tok/s small dim | 0.3GB <1.9GB | 0.05J 56x | 128x | 16x fewer ops + tropical 0 mults | 64 | ~20x | $0 |
-| BitNet 100B | 5-7 tok/s single CPU | 0.4GB | 0.4J 71.9-82.2% saving | - | 0 mults ternary | - | - | $0 |
-| Phi-4 Mini 3.8B | 12 tok/s CPU AVX-512 | - | - | - | - | - | - | $0 |
-| LSTM 384 | FAILS cos -0.05 long-range | - | - | - | - | 4e-24 decay | - | $0 |
-| p-adic Hierarchical | 7k ops 2KB vs 262k 1024KB | 2KB | - | 512x | 63.9x fewer ops 2.3e8x for 1M | 1M 4 hops | - | - |
+Every check is recorded in `benchmark_report.json` alongside the value it asserted, so a
+passing check can be audited against the measurement that justified it.
 
 ---
 
-### 6. Charts — 6x300-DPI PNGs
+## 3. Verification checks
 
-- speed.png — 60-70 tok/s CPU beats GPU 80 batch=1
-- energy.png — 0.028J/1k 100x less vs Transformer 2.8J
-- memory_saving.png — 0.9GB 512x less vs 14GB HBM
-- ops_saving.png — 64x fewer ops + 0 mults tropical
-- momr.png — ~120x MOMR
-- context.png — 1M vs 4k 250x context p-adic 3 hops
+Each size must pass six checks:
+
+| Check | Assertion |
+| --- | --- |
+| `weights_real` | Weight bytes > 0 and do not exceed total process RAM |
+| `ram_real` | Measured RSS delta is consistent with the weight footprint |
+| `timing_real` | Generation produced the requested token count in positive elapsed time |
+| `loss_trend` | Training loss decreased over the step budget |
+| `state_stability` | The same token prefix yields a similar final hidden state with and without a suffix |
+| `init_ok` | The model constructed without error |
+
+`assert_real_weights` compares measured weight bytes against measured RSS rather than
+against an assumed constant. An earlier version of this gate iterated a list of
+`(name, parameter)` tuples as if they were parameters, so the gate raised a `TypeError`
+internally and was reported as a failure unrelated to the thing it was checking. That is
+fixed and the gate now reports its own measurements.
 
 ---
 
-## License
+## 4. Corpora
 
-MIT + No Big Tech Clause — Open Source — Breaks monopoly — Physics free, data centers not
+The benchmark attempts three public corpora and reports which ones were actually
+available:
 
-**CPU is the people. GPU is the monopoly. Feather v2 is CPU's revenge.**
+| Corpus | Identifier | Role |
+| --- | --- | --- |
+| OpenWebText | `Skylion007/openwebtext` | Tokenisation throughput |
+| Wikipedia | `wikimedia/wikipedia`, config `20231101.en` | Training loss |
+| no_robots | `HuggingFaceH4/no_robots` | Held-out generation text |
+
+If a corpus cannot be loaded, the benchmark records that fact and marks the measurement
+that depended on it as unavailable. It does not substitute a placeholder corpus or a
+synthetic string.
+
+Note that OpenWebText is published under the namespace `Skylion007`, not the bare
+`openwebtext` name. The earlier identifier was wrong and has been corrected.
+
+---
+
+## 5. Reproducing
+
+```bash
+# Full ladder
+python kaggle/test_all_sizes_mega.py --loss-steps 60
+
+# Single size, fewer steps, for a quick check
+python kaggle/test_all_sizes_mega.py --sizes 5M --loss-steps 20
+```
+
+Artifacts written:
+
+- `benchmark_report.json` — every measurement and check, per size
+- `docs/images/scaling.png` — parameter count against RAM
+- `docs/images/memory_vs_params.png`
+- `docs/images/loss_all_sizes.png`
+- `docs/images/toks_vs_seqlen.png`
+- `docs/images/energy_vs_size.png`
+
+Then regenerate the results document:
+
+```bash
+python scripts/make_report.py
+```
+
+---
+
+## 6. Reference machine
+
+All committed measurements were taken on a single machine:
+
+| Property | Value |
+| --- | --- |
+| CPU | Intel Core i5-3337U @ 1.80GHz |
+| Cores | 2 physical / 4 logical |
+| RAM | ~2.97 GB |
+| SIMD | AVX. No AVX2, AVX-512, or AMX |
+| Accelerator | None. CPU only |
+| Platform | Windows |
+
+This is a low-end 2013 mobile CPU. Throughput on other hardware has not been measured.
+The exact feature flags and kernel binding chosen for this machine are recorded in the
+`hardware` block of `benchmark_report.json`.
+
+---
+
+## 7. Limits of these results
+
+- **One machine.** No cross-hardware comparison exists.
+- **No accuracy evaluation.** No MMLU, no perplexity on a standard held-out benchmark, no
+  task performance. The loss figures in `RESULTS_v2.0.md` are training loss on raw corpus
+  text over a short step budget, which says nothing about model quality.
+- **No baseline.** There is no reference model measured under identical conditions, so no
+  speedup or efficiency ratio is reported.
+- **Energy is not per-token.** The reported joules cover one forward pass plus a short
+  generation as a single figure, not a normalised per-token cost, so it cannot be compared
+  against any other energy figure.
+- **RAM is dominated by the PyTorch runtime.** For the 5M config, weights are about
+  19 MB while process RSS is several hundred MB. The gap is interpreter and library
+  overhead, not the model.
+- **State stability is not a context-length result.** It compares the final hidden state of
+  a token prefix encoded alone against the same prefix encoded as the start of a longer
+  sequence, at the same position. It measures how much a suffix perturbs an earlier
+  representation. It is not evidence of long-context capability.
+
+  An earlier version of this check compared the final *logits* of a short prefix against
+  the final logits of a full sequence. That was wrong twice over: it compared a
+  vocab-wide vector rather than a representation, and it compared two different positions.
+  It now captures the hidden state via a forward hook and compares the same position.

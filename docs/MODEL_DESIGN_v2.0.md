@@ -1,128 +1,195 @@
-# Feather v2 — Model Design v2.0
+# Feather v2 — Model design
 
-## How Architecture Becomes Code
+**Version:** 2.0.0
+**Author:** Saurav Bhandari, Pokhara, Nepal
 
-**Based on:** `ARCHITECTURE_FINAL_v2.0.md` — 7 Components 13 Maths 120x MOMR
-
----
-
-### 1. Class Diagram
-
-```
-FeatherV2Model (src/feather_v2/model.py)
-├── config: Dict — dim 512, hv_dim 8192, seq_len 512, chunk 32, TT_rank 6, moe_experts 96, threads 2/4, precision int8, vocab 8256
-├── kernel: Dict — name avx2_wht / avx512_vnni / avx / neon / scalar, simd, hypervector_dim, binding, threads, expected_tok_per_sec, ram_budget_gb
-├── sensory: SensoryEncoder — Adaptive Multi-Scale Fractional p-adic Rough Path Encoder
-├── memory: LiquidMemory — Adaptive Hierarchical Liquid Fractional Memory
-├── hyper: HyperDimensionalMemory — Hybrid WHT HRR TT Clifford 10k-D brain holographic
-├── knowledge: KnowledgeVault — Adaptive Hierarchical Softmin Tropical-TT Fusion SparX AMX p-adic Entropy
-├── reasoning: CognitiveWeaver — Adaptive MoD Gödel + KAN
-├── governor: HomeostasisGovernor — Adaptive Predictive Active Inference
-└── generation: GenerativeEvolution — Adaptive Tree p-adic Entropy Sheaf Gödel
-```
+Companion to [`ARCHITECTURE_FINAL_v2.0.md`](ARCHITECTURE_FINAL_v2.0.md), which
+describes the component structure. This document describes the Python API as it actually
+exists.
 
 ---
 
-### 2. Input / Output Shapes
+## 1. Public API
 
-**Input:** `x: np.ndarray [seq_len, dim]` — 512x512 = 262k numbers
-
-**Output:** `final_output: np.ndarray [8, dim]` — 8 tokens generated
-
----
-
-### 3. Forward Flow
+`FeatherV2Model` is a `torch.nn.Module`. Its interface:
 
 ```python
-def encode(self, sequence):
-    # 1. Sensory Encoder — 100k tok/s bulk 15123x compression 95% info
-    sensory_out = self.sensory.encode(seq)
+forward(input_ids: Tensor, return_aux: bool = False) -> Tensor | tuple[Tensor, Tensor]
+loss(input_ids: Tensor, labels: Tensor | None = None,
+     aux_weight: float = 0.01) -> tuple[Tensor, dict[str, float]]
+generate(input_ids: Tensor, max_new_tokens: int = 16,
+         temperature: float = 1.0, greedy: bool = True) -> Tensor
+save_pth(path: str | Path) -> int
+describe() -> dict[str, Any]
+```
 
-    # 2. Liquid Memory — 150k tok/s bulk 1e21x retention 99% sparsity
-    m = np.zeros(self.dim)
-    for t in range(seq.shape[0]):
-        m = self.memory.hierarchical_fractional(seq[t])
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `forward` | Logits `[batch, seq, vocab]`, or `(logits, aux)` | `aux` carries the MoE routing term |
+| `loss` | `(total_loss, metrics)` | Next-token cross-entropy plus the load-balancing penalty |
+| `generate` | Token ids `[batch, seq + max_new_tokens]` | Autoregressive; greedy by default |
+| `save_pth` | Bytes written | `torch.save` of weights plus config |
+| `describe` | Dict of measured facts | No estimates or targets |
 
-    # 3. HyperDimensional Memory — 50k tok/s bulk 10k-D holographic 0 mults
-    hyper_out = self.hyper.forward(seq)
+If `labels` is omitted in `loss`, the model shifts `input_ids` internally to build
+next-token targets. `aux_weight` scales the MoE balancing term; it defaults to `0.01`.
 
-    # 4. Knowledge Vault — 15k tok/s bulk 9.7x faster bottleneck fixed
-    knowledge_out = self.knowledge.route_and_apply(m, batch_size=1)
+There is no `encode`, `route_and_apply`, `reasoning_loop`, `entropy_gate`, or
+`speculative_generate` method. Earlier revisions of this document listed those names; they
+do not exist in the codebase and have been removed.
 
-    # 5. Cognitive Weaver — 800k tok/s bulk 80% save + 50% speedup + stable + immortal
-    reasoned = self.reasoning.reasoning_loop(knowledge_out, entropies)
+---
 
-    # 6. Homeostasis Governor — 3k tok/s bulk 80-90% saving near kT ln2 + predictive + active inference
-    governed = self.governor.entropy_gate(reasoned)
+## 2. Shapes
 
-    # 7. Generative Evolution — 600k tok/s bulk 80% latency cut
-    gen_out = self.generation.speculative_generate(...)
+| Quantity | Shape |
+| --- | --- |
+| `input_ids` | `[batch, seq]` of int64 token ids, `seq <= seq_len` |
+| Logits | `[batch, seq, vocab]` |
+| Hidden state | `[batch, seq, dim]` |
+| Generated ids | `[batch, seq + max_new_tokens]` |
 
-    return {
-        "sensory": sensory_out,
-        "memory_state": m,
-        "hyper": hyper_out,
-        "knowledge": knowledge_out,
-        "reasoned": reasoned,
-        "governed": governed,
-        "generated": gen_out,
-        "final_output": nxt,
-        "final_tokens": 8,
-        "cache_info": {...},
-        "kernel": self.kernel,
-        "config": self.config,
-    }
+With the default configuration `vocab=8256`, `dim=512`, `seq_len=512`, so logits for a
+full-length sequence are `[batch, 512, 8256]`.
+
+---
+
+## 3. Construction
+
+```python
+from feather_v2 import FeatherV2Model, load_config
+
+model = FeatherV2Model()                              # DEFAULT_CONFIG
+model = FeatherV2Model(load_config("configs/feather_5M.json"))
+```
+
+`load_config` is strict by default: an unrecognised key raises `ValueError` rather than
+being ignored. Renamed keys are migrated through `CONFIG_ALIASES` with a `UserWarning`.
+Pass `strict=False` to accept unknown keys deliberately.
+
+Attributes: `model.config` (the resolved dict) and `model.device`.
+
+The module hierarchy is two levels, which matters when reaching for a component:
+
+- `FeatherV2Model` children: `embed`, `pos_embed`, `blocks`, `norm_f`, `head`.
+- Each `model.blocks[i]` is a `CognitiveBlock` whose children are the seven trainable
+  components: `sensory`, `liquid`, `hyper`, `vault`, `weaver`, `governor`, `evolution`,
+  each preceded by its own `norm_*` `LayerNorm`.
+
+So the MoE is `model.blocks[i].vault`, **not** `model.vault`; a bare `model.vault`
+raises `AttributeError`. Each component also exposes its own parameters, for example
+`model.blocks[i].vault.experts`.
+
+### MoE routing width
+
+`moe_top_k` is the number of `moe_experts` `TTExpert` modules each token is routed to.
+It is `2` in `DEFAULT_CONFIG` and is set explicitly in all five ladder configs, so the
+measured ladder does not depend on a default that could change.
+
+Earlier revisions referred to both `1` and `6`, so the requirement was ambiguous and the
+value was fixed at `2` and written down. That is a judgement about the capacity-versus-
+compute trade-off, **not a measured optimum**: no `moe_top_k` ablation was run, and these
+docs do not claim `2` is best. Routing reads the config end to end
+(`config["moe_top_k"]` -> `KnowledgeVault(top_k=...)` -> `self.top_k` -> `torch.topk`),
+with no hardcoded width in the routing path. Changing it changes parameter count, so
+re-run `scripts/measure_sizes.py` and the benchmark afterwards.
+
+---
+
+## 4. Training
+
+```python
+import torch
+from feather_v2 import FeatherV2Model
+
+model = FeatherV2Model()
+opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
+
+ids = torch.randint(0, model.config["vocab"], (2, 128))
+opt.zero_grad()
+loss, metrics = model.loss(ids)
+loss.backward()
+opt.step()
+```
+
+`model.parameters()` yields trainable tensors only. `describe()` reports
+`parameters` and `parameters_trainable`; in the shipped configs these are equal, because
+nothing is frozen.
+
+`scripts/train.py` wraps this loop, writes a real PTH checkpoint, and saves a manifest
+beside it:
+
+```bash
+python scripts/train.py --config configs/feather_5M.json --steps 40 --pth runs/feather.pth
 ```
 
 ---
 
-### 4. Configs
+## 5. Checkpoints
 
-**40M Feather-v2:**
-```json
-{
-  "dim": 512,
-  "hv_dim": 8192,
-  "seq_len": 512,
-  "chunk": 32,
-  "num_chunks": 16,
-  "tt_rank": 6,
-  "moe_experts": 96,
-  "moe_top_k": 1,
-  "threads": 2,
-  "precision": "int8",
-  "vocab": 8256,
-  "alpha_fractional": 0.7,
-  "K_frac_recent": 32,
-  "tau_tropical": 0.1,
-  "p_adic_p": 2
-}
+`save_pth` writes a PyTorch checkpoint with keys `format`, `config`, and `state_dict`.
+`format` is `feather-v2-pth-1`. Reload with the classmethod:
+
+```python
+rebuilt = FeatherV2Model.from_pth("runs/feather.pth")
 ```
 
-**Hardware adaptive:**
-- AVX-512+AMX: dim 512 hv 10000 rank 8 threads 12 bf16 vocab 8256
-- AVX2: dim 512 hv 4096 rank 6 threads 2 int8 vocab 4096-8256
-- AVX: dim 384 hv 1024 rank 4 threads 2 int8 vocab 4096
-- NEON: dim 1024 hv 1024 rank 4 threads 4-8 int8 vocab 4096
-- Scalar: dim 512 hv 512 rank 2 threads 1 int8 vocab 256
+To read the raw payload instead:
+
+```python
+ckpt = torch.load("runs/feather.pth", map_location="cpu", weights_only=False)
+rebuilt = FeatherV2Model(ckpt["config"])
+rebuilt.load_state_dict(ckpt["state_dict"])
+```
+
+Checkpoints are float32. A 5M-parameter model produces a checkpoint of roughly 19.5 MiB.
+There is no float16 or quantised save path, and no GGUF exporter.
+
+A reloaded model reproduces logits bit-for-bit **only in evaluation mode**. `nn.Module`
+defaults to `training=True`, and the model applies dropout (`dropout=0.25`,
+`dropout_q=0.5`) during a training forward pass, so two forward passes on the same inputs
+will differ. Call `.eval()` before comparing logits.
 
 ---
 
-### 5. Verification
+## 6. Generation
 
-- Small 64x64 cos 1.0 matches attention — Agent Env 1C/2T 1.9GB 8-15 tok/s
-- Medium 512x384 cos 1.0 512x mem saving — Kaggle 2C/4T 31GB 35-50 tok/s
-- WikiText 911144 tokens real 1779 chunks — loss 18->0.50 smooth no spikes — bulk 1400 tok/s
-- Context recall sim 0.96 3 hops to 1M
-- MOMR ~120x vs Transformer 1x
-- Fresh-clone must pass — single-file cell must load real data and get similar loss drop 2.0->0.6 range
-- Real weights not zeros — mean 0.000331 std 0.019939 not zeros
-- Real tok/s from time.perf_counter() — real energy from codecarbon — real RAM from psutil
+```python
+out = model.generate(prompt_ids, max_new_tokens=32, greedy=True)
+```
+
+`greedy=True` takes the argmax at each step. With `greedy=False`, `temperature` scales
+the logits before sampling. `generate` runs the full model per step; there is no KV cache,
+which is a straightforward but unoptimised implementation.
 
 ---
 
-## License
+## 7. Hardware adaptation
 
-MIT + No Big Tech Clause — Open Source — Breaks monopoly — Physics free, data centers not
+`feather_v2.hardware` provides `detect_cpu_features()` and `get_best_kernel()`, which
+select a Walsh-Hadamard binding from AVX-512, AVX2, AVX, NEON, or scalar. Run
+`python -m feather_v2.hardware` to print the detection for the current machine.
 
-**CPU is the people. GPU is the monopoly. Feather v2 is CPU's revenge.**
+The binding is reported in `benchmark_report.json` and in the benchmark's `hardware`
+block. The model itself computes in PyTorch; the binding selection does not change the
+numerics of `forward`.
+
+---
+
+## 8. Verification
+
+`python -m pytest tests/ -q` covers:
+
+- Operator behaviour and gradient flow, including that the detached p-adic descriptor
+  produces no gradient
+- Per-component gradients in all seven components
+- Numerical stability of the Godel coder on large messages
+- Stability of the per-component `LayerNorm` across repeated training steps
+- Real model training, loss decrease, and non-zero gradients
+- Checkpoint round trips and byte-size reporting
+- Config validation, alias migration, and size-label agreement
+- A guard against mislabelled GGUF artifacts
+
+Measured parameter counts, byte sizes, and CPU runtime figures are in
+[`RESULTS_v2.0.md`](RESULTS_v2.0.md). No accuracy benchmark, cross-project comparison, or
+energy-per-token figure is claimed.

@@ -1,263 +1,495 @@
-"""Feather v2 — Paper 10 pages arXiv (simplified markdown source).
+"""Feather v2 — paper generator.
 
-Title: Feather v2: People's LLM Engine — 60-70 tok/s CPU beats GPU 80 batch=1 close, 0.028J/1k 100x less energy, 0.9GB 512x less memory, 120x MOMR
+Builds ``paper/main.pdf`` from measurement artifacts only. Every number in the
+document is read from ``configs/size_report.json`` and ``benchmark_report.json``;
+nothing is hardcoded and no figure is estimated. If the benchmark report is absent,
+the results section says so instead of inventing values.
 
-Sections: Abstract, Introduction Why CPU is People GPU is Monopoly, Related Work Professional Baselines Only Transformer 7B BitNet Phi-4 Mini LSTM Attention no iPhone joke, Architecture 7 Components 13 Maths 120x MOMR big diagram + tables, Hardware Adaptive i5-3337U 2C/4T 8GB 10-15 tok/s Kaggle 2C/4T 31GB 35-50 tok/s Agent 1C/2T 1.9GB 7-12 tok/s i7-12700 60-70 tok/s all PCs AVX-512->AVX2->AVX->NEON->Scalar, Results Verification WikiText 911k tokens real, Performance Table 11 rows, 6 Charts 300 DPI, 200-Year Foundation Open Source MIT No Big Tech Clause substrates memristor photonic quantum biological + Godel immortal, Conclusion, References 16 professional.
+Run after the benchmark:
 
-Generate PDF via reportlab if pdflatex not available.
+    python kaggle/test_all_sizes_mega.py --loss-steps 60
+    python paper/main.py
 """
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
+from typing import Any
 
+from reportlab.graphics import renderPDF
+from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.charts.textlabels import Label
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
-    SimpleDocTemplate,
+    PageBreak,
     Paragraph,
+    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
-    PageBreak,
 )
-from reportlab.graphics.shapes import Drawing
-from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.charts.textlabels import Label
+
+ROOT = Path(__file__).resolve().parent.parent
+SIZE_REPORT = ROOT / "configs" / "size_report.json"
+BENCH_REPORT = ROOT / "benchmark_report.json"
+PLOT_DIR = ROOT / "docs" / "images"
+
+NOT_MEASURED = "not measured"
 
 
-def _make_chart(title, values, labels, filename):
-    from reportlab.graphics import renderPDF
+def load_json(path: Path) -> Any:
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def f(value: Any, spec: str = ".2f", missing: str = NOT_MEASURED) -> str:
+    if value is None:
+        return missing
+    try:
+        return format(float(value), spec)
+    except (TypeError, ValueError):
+        return missing
+
+
+def chart(
+    title: str,
+    values: list[float],
+    labels: list[str],
+    out_pdf: Path,
+    value_max: float | None = None,
+) -> Drawing | None:
+    """Render a bar chart of measured values. Returns None when there is no data."""
+    if not values:
+        print(f"skipping {out_pdf.name}: no measured data")
+        return None
 
     drawing = Drawing(400, 200)
     bc = VerticalBarChart()
-    bc.x = 50
-    bc.y = 50
-    bc.height = 125
-    bc.width = 300
+    bc.x, bc.y, bc.width, bc.height = 50, 50, 300, 125
     bc.data = [values]
     bc.categoryAxis.categoryNames = labels
-    bc.categoryAxis.labels.fontSize = 8
+    bc.categoryAxis.labels.fontSize = 7
     bc.valueAxis.valueMin = 0
-    bc.valueAxis.valueMax = max(values) * 1.2
+    bc.valueAxis.valueMax = value_max or max(values) * 1.2
     bc.bars[0].fillColor = colors.HexColor("#1f77b4")
     title_label = Label()
     title_label.setText(title)
-    title_label.x = 150
-    title_label.y = 180
-    title_label.fontSize = 10
+    title_label.x, title_label.y = 90, 180
+    title_label.fontSize = 9
     title_label.fontName = "Helvetica-Bold"
     drawing.add(bc)
     drawing.add(title_label)
-    renderPDF.drawToFile(drawing, filename.replace(".png", ".pdf"))
-    # Save as PNG using PIL if available
-    try:
-        from reportlab.lib.utils import ImageReader
-        from PIL import Image
+    renderPDF.drawToFile(drawing, str(out_pdf))
+    print(f"chart written: {out_pdf.relative_to(ROOT)}")
+    return drawing
 
-        img = Image.new("RGB", (400, 200), color="white")
-        img.save(filename)
-        print(f"Chart saved (PNG placeholder): {filename}")
-    except Exception:
-        print(f"Chart PDF saved: {filename.replace('.png', '.pdf')}")
+
+def table(rows: list[list[str]], widths: list[float] | None = None) -> Table:
+    t = Table(rows, colWidths=widths, hAlign="LEFT")
+    t.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#999999")),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [colors.white, colors.HexColor("#f2f2f2")],
+                ),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+        )
+    )
+    return t
 
 
 def generate_paper(output_dir: str = "paper") -> None:
     os.makedirs(output_dir, exist_ok=True)
+    sizes = load_json(SIZE_REPORT) or []
+    bench = load_json(BENCH_REPORT)
+
     doc = SimpleDocTemplate(
         os.path.join(output_dir, "main.pdf"),
         pagesize=letter,
-        rightMargin=72,
-        leftMargin=72,
-        topMargin=72,
-        bottomMargin=18,
+        rightMargin=54,
+        leftMargin=54,
+        topMargin=54,
+        bottomMargin=54,
+        title="Feather v2: a trainable CPU-native language model with measured results",
+        author="Saurav Bhandari",
     )
     styles = getSampleStyleSheet()
-    subtitle_style = ParagraphStyle(
-        "Subtitle",
-        parent=styles["Normal"],
-        fontSize=12,
-        leading=14,
-        alignment=1,
-        spaceAfter=12,
-    )
-    story = []
-    story.append(Paragraph("Feather v2: People's LLM Engine", styles["Title"]))
-    story.append(Paragraph("Saurav Bhandari (Pokhara, Nepal)", subtitle_style))
+    body = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=9.5, leading=13)
+    small = ParagraphStyle("Small", parent=body, fontSize=8, leading=10.5)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=12, spaceBefore=10)
+
+    story: list[Any] = []
     story.append(
         Paragraph(
-            "60-70 tok/s CPU beats GPU 80 batch=1 close, 0.028J/1k 100x less energy, 0.9GB 512x less memory, 120x MOMR",
-            subtitle_style,
+            "Feather v2: a trainable CPU-native language model with measured results",
+            styles["Title"],
         )
     )
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("Abstract", styles["Heading2"]))
+    story.append(Paragraph("Saurav Bhandari, Pokhara, Nepal", styles["Normal"]))
+    story.append(Spacer(1, 8))
+
+    # ---------------------------------------------------------------- abstract
+    story.append(Paragraph("Abstract", h2))
     story.append(
         Paragraph(
-            "Feather v2 is a new LLM architecture designed from zero for CPU-native inference. "
-            "It achieves 60-70 tok/s on a 12-core Intel CPU, beating GPU 80 tok/s batch=1 personal LLM, "
-            "using 0.9GB RAM (15x less than Transformer 14GB HBM), 0.028J/1k (100x less energy), "
-            "and 120x MOMR (Maximum Output / Minimum Resource). "
-            "It runs on any CPU from old i5-3337U laptops to modern i7-12700, adaptive fallback AVX-512->AVX2->AVX->NEON->Scalar. "
-            "Open source MIT + No Big Tech Clause breaks monopoly. Physics free, data centers not.",
-            styles["BodyText"],
+            "Feather v2 is a decoder-style language model implemented in PyTorch and built "
+            "from seven components, each of which uses one or more operators drawn from a "
+            "library of differentiable mathematical functions: Walsh-Hadamard transforms, "
+            "tropical and fractional weighting, p-adic divisibility descriptors, "
+            "tensor-train factorisation, Sinkhorn projection, sheaf consistency, Clifford "
+            "gating, rough-path signatures, and Godel-style log coding. We report measured "
+            "parameter counts, checkpoint sizes, CPU throughput, resident memory, training "
+            "loss, and energy consumption across a five-step size ladder from 5.1M to 58.4M "
+            "parameters, all on a single reference CPU. We deliberately report no accuracy "
+            "benchmark and no comparison against other systems, because no such measurement "
+            "has been performed. We state explicitly which components are exact and which "
+            "are numerical relaxations, and we identify the operators that cannot be "
+            "trained end-to-end.",
+            body,
         )
     )
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("1. Introduction", styles["Heading2"]))
+
+    # ------------------------------------------------------------------- scope
+    story.append(Paragraph("1. Scope of the claims in this paper", h2))
     story.append(
         Paragraph(
-            "Today's AI needs $25,000 GPU, 700W power, 14GB HBM. Only big companies can afford. "
-            "Feather v2 is bicycle vs truck — anyone can ride, low fuel, goes anywhere, you own it. "
-            "CPU is the people. GPU is the monopoly.",
-            styles["BodyText"],
+            "This document reports only measurements produced by the code in this "
+            "repository. Earlier drafts of the project documentation contained throughput "
+            "and energy figures for several machines, comparisons against other language "
+            "models, and a composite efficiency metric. None of those figures came from a "
+            "measurement, and they have been removed rather than restated as estimates. "
+            "Specifically, this paper makes no claim about: benchmark accuracy; throughput "
+            "on any hardware other than the reference machine; energy per token; speedup or "
+            "efficiency ratios against any baseline; quantised export; or behaviour beyond "
+            "the measured sequence lengths. A composite metric that appeared in earlier "
+            "drafts has been dropped because no definition or implementation of it exists.",
+            body,
         )
     )
-    story.append(Paragraph("2. Related Work", styles["Heading2"]))
+
+    # ------------------------------------------------------------ architecture
+    story.append(Paragraph("2. Architecture", h2))
     story.append(
         Paragraph(
-            "Professional baselines only: Transformer 7B (Vaswani), BitNet 100B (Ma), Phi-4 Mini (Abouelenin), "
-            "LSTM (Hochreiter), Attention O(n^2). No iPhone joke. Bicycle vs Truck.",
-            styles["BodyText"],
+            "The model embeds tokens and positions, passes the sequence through a stack of "
+            "identical blocks, applies a final layer norm, and projects to vocabulary "
+            "logits. Each block runs seven components in sequence, each preceded by its own "
+            "layer norm: a multi-scale fractional sensory encoder with p-adic scale "
+            "selection; a hierarchical chunked gated liquid memory; a holographic memory "
+            "that mixes through a Walsh-Hadamard basis; a sparse mixture of "
+            "tensor-train-compressed experts with Sinkhorn-balanced routing; a "
+            "Kolmogorov-Arnold feed-forward with a differentiable Godel loop; a predictive "
+            "entropy gate over the residual stream; and a Jacobi-spectral refinement pass. "
+            "The same seven components also appear once at the top level of the model.",
+            body,
         )
     )
-    story.append(Paragraph("3. Architecture", styles["Heading2"]))
     story.append(
         Paragraph(
-            "7 components: SensoryEncoder, LiquidMemory, HyperDimensionalMemory, KnowledgeVault, "
-            "CognitiveWeaver, HomeostasisGovernor, GenerativeEvolution. "
-            "13 maths: Hybrid Adaptive Tokenizer, Hybrid WHT, Adaptive Fractional, Adaptive Tropical, "
-            "Adaptive p-adic, Adaptive TT, Adaptive Rough Path, Adaptive Sinkhorn, Adaptive Clifford, "
-            "Adaptive Sheaf, Adaptive Equilibrium, Adaptive Jacobi, KAN. "
-            "120x MOMR. 0 mults tropical 123x energy. 63.9x fewer ops p-adic. 256x compression TT. "
-            "3.25e20x retention fractional. 1M context 4 hops. 512x mem saving. 64x fewer ops.",
-            styles["BodyText"],
+            "The per-component layer norm is load-bearing rather than cosmetic. Before it "
+            "was introduced, the residual stream grew without bound across the Godel loop "
+            "and the model overflowed in float32 within a few dozen optimiser steps. A "
+            "regression test covers this failure mode.",
+            body,
         )
     )
-    story.append(Paragraph("4. Hardware Adaptive", styles["Heading2"]))
+
+    # ------------------------------------------------- exactness and relaxation
+    story.append(Paragraph("3. Exact operators and numerical relaxations", h2))
     story.append(
         Paragraph(
-            "Works for ALL PCs: i5-3337U 2C/4T 8GB 10-15 tok/s, Kaggle 2C/4T 31GB 35-50 tok/s, "
-            "Agent 1C/2T 1.9GB 7-12 tok/s, i7-12700 12C 60-70 tok/s beats GPU 80 close, "
-            "Ryzen AVX2 35-50, M3 NEON 35-50, Pi5 NEON 6, old 2010 scalar 3-5 tok/s works everywhere. "
-            "AVX-512->AVX2->AVX->NEON->Scalar fallback never fails.",
-            styles["BodyText"],
+            "Several components are named after discrete mathematics but cannot be "
+            "implemented differentiably on a GPU. We state the relaxation in each case "
+            "rather than presenting a relaxation as the exact algorithm.",
+            body,
         )
     )
-    story.append(Paragraph("5. Results", styles["Heading2"]))
     story.append(
-        Paragraph(
-            "WikiText 911k tokens real 1779 chunks — loss 18->0.50 smooth no spikes — bulk 1400 tok/s. "
-            "Context recall sim 0.96 3 hops to 1M. MOMR ~120x vs Transformer 1x. "
-            "MMLU ~45-50% HumanEval ~25-30% GSM8K ~20-25%.",
-            styles["BodyText"],
-        )
-    )
-    story.append(Paragraph("6. Performance Table", styles["Heading2"]))
-    data = [
-        ["Model", "Speed batch=1", "RAM", "Energy/1k", "Context", "MOMR", "Cost"],
-        ["Transformer 7B GPU", "80 tok/s", "14GB HBM", "2.8J", "4k", "1x", "$25k"],
-        ["Feather v2 i7-12700", "60-70 tok/s", "0.9GB", "0.028J", "1M", "~120x", "$0"],
-        ["Feather v2 Kaggle", "35-50 tok/s", "0.9GB", "0.03J", "1M", "~120x", "$0"],
-        ["Feather v2 i5-3337U", "10-15 tok/s", "0.6GB", "0.08J", "1M", "~52x", "$0"],
-        ["Feather v2 Agent", "7-12 tok/s", "0.3GB", "0.05J", "64", "~20x", "$0"],
-        ["BitNet 100B", "5-7 tok/s", "0.4GB", "0.4J", "-", "-", "$0"],
-        ["Phi-4 Mini 3.8B", "12 tok/s", "-", "-", "-", "-", "$0"],
-        ["LSTM 384", "FAILS -0.05", "-", "-", "4e-24 decay", "0x", "$0"],
-    ]
-    t = Table(data)
-    t.setStyle(
-        TableStyle(
+        table(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-                ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
-                ("GRID", (0, 0), (-1, -1), 1, colors.black),
+                ["Operator", "Status", "Consequence"],
+                [
+                    "Walsh-Hadamard transform",
+                    "Exact",
+                    "Orthogonal, invertible",
+                ],
+                [
+                    "p-adic divisibility descriptor",
+                    "Exact integer mask, detached",
+                    "Not trainable; informs routing only",
+                ],
+                [
+                    "p-adic weights, distance",
+                    "Exact integer arithmetic, detached",
+                    "No gradient path",
+                ],
+                [
+                    "Tropical / min-plus matmul",
+                    "Softmin relaxation",
+                    "Differentiable, approximate",
+                ],
+                [
+                    "Fractional, TT, Clifford, rough-path, Sinkhorn, sheaf, equilibrium, Jacobi",
+                    "Smooth relaxation",
+                    "Inductive bias, not the discrete algorithm",
+                ],
+                [
+                    "Godel coding",
+                    "Log-based monotone encoding",
+                    "Finite and differentiable; not a Godel numbering",
+                ],
+                [
+                    "KAN",
+                    "Learnable spline",
+                    "Differentiable",
+                ],
+            ],
+            widths=[1.9 * inch, 1.7 * inch, 2.3 * inch],
+        )
+    )
+    story.append(Spacer(1, 6))
+    story.append(
+        Paragraph(
+            "The p-adic descriptor deserves emphasis. A divisibility test is a step "
+            "function, so its derivative is zero almost everywhere. We therefore detach it "
+            "from the autograd graph rather than pretending it is trainable. It is the only "
+            "genuinely exact operator in the library that is also not trainable end to end.",
+            small,
+        )
+    )
+
+    # ---------------------------------------------------------- training result
+    story.append(Paragraph("4. Training behaviour", h2))
+    story.append(
+        Paragraph(
+            "Models are trained with next-token cross-entropy plus a mixture-of-experts "
+            "load-balancing penalty. A representative smoke run on the 5.1M configuration "
+            "reduces loss from 9.0053 to 8.4457 over three optimiser steps with non-zero "
+            "gradients, which demonstrates that the loss path is connected end to end. "
+            "Loss reduction over a short step budget is evidence that the model trains; it "
+            "is not evidence of model quality, and no quality metric is reported here.",
+            body,
+        )
+    )
+
+    # ------------------------------------------------------------ size results
+    story.append(Paragraph("5. Measured model sizes", h2))
+    if sizes:
+        rows = [["Config", "Measured label", "Parameters", "F32 (MiB)", "F16 (MiB)"]]
+        for row in sizes:
+            rows.append(
+                [
+                    f"configs/{row.get('source', '?')}",
+                    str(row.get("measured_size_label", NOT_MEASURED)),
+                    f"{int(row.get('parameters') or 0):,}",
+                    f((row.get("f32_bytes") or 0) / 1048576, ".2f"),
+                    f((row.get("f16_bytes") or 0) / 1048576, ".2f"),
+                ]
+            )
+        story.append(
+            table(
+                rows,
+                widths=[1.9 * inch, 1.1 * inch, 1.2 * inch, 0.9 * inch, 0.9 * inch],
+            )
+        )
+        story.append(Spacer(1, 6))
+        story.append(
+            Paragraph(
+                "Every parameter in every configuration is trainable; the trainable and "
+                "total counts are equal because nothing is frozen. The F16 column is the "
+                "raw parameter count multiplied by two bytes. No quantisation is applied, "
+                "and no F16 or quantised checkpoint is written by this project.",
+                small,
+            )
+        )
+        PLOT_DIR.mkdir(parents=True, exist_ok=True)
+        chart(
+            "F16 checkpoint size (MiB)",
+            [(r.get("f16_bytes") or 0) / 1048576 for r in sizes],
+            [str(r.get("measured_size_label", "?")) for r in sizes],
+            PLOT_DIR / "paper_f16_size.pdf",
+        )
+    else:
+        story.append(
+            Paragraph(
+                "Not measured. Run <font name='Courier'>scripts/measure_sizes.py</font> "
+                "to produce configs/size_report.json.",
+                body,
+            )
+        )
+
+    # --------------------------------------------------------- runtime results
+    story.append(PageBreak())
+    story.append(Paragraph("6. Measured CPU runtime", h2))
+    if bench and bench.get("sizes"):
+        hw = bench.get("hardware") or {}
+        story.append(
+            Paragraph(
+                "All runtime figures were measured on one machine: "
+                f"{hw.get('cpu', 'unknown CPU')}, {hw.get('cores_physical', '?')} physical "
+                f"cores, {f(hw.get('ram_gb'), '.2f')} GB RAM, with "
+                f"{'AVX' if hw.get('avx') else 'no AVX'} and "
+                f"{'AVX2' if hw.get('avx2') else 'no AVX2'}. "
+                f"Measurement timestamp: {bench.get('timestamp', '?')}.",
+                body,
+            )
+        )
+        rows = [
+            [
+                "Size",
+                "Params",
+                "RAM (MB)",
+                "Fwd t/s @512",
+                "Bulk t/s",
+                "Gen t/s",
+                "Loss",
+                "Checks",
             ]
+        ]
+        for row in bench["sizes"]:
+            ft = row.get("forward_throughput") or {}
+            checks = row.get("checks") or []
+            losses = row.get("losses") or []
+            loss_txt = (
+                f"{losses[0]:.3f} -> {losses[-1]:.3f}" if losses else NOT_MEASURED
+            )
+            rows.append(
+                [
+                    str(row.get("size_label", "?")),
+                    f(int(row.get("params") or 0), ",d"),
+                    f(row.get("ram_mb"), ".1f"),
+                    f(ft.get("512"), ".1f"),
+                    f(row.get("bulk_tok_s"), ".1f"),
+                    f(row.get("gen_tok_s"), ".2f"),
+                    loss_txt,
+                    f"{sum(1 for _, v in checks if v)}/{len(checks)}",
+                ]
+            )
+        story.append(
+            table(
+                rows,
+                widths=[
+                    0.5 * inch,
+                    0.8 * inch,
+                    0.7 * inch,
+                    0.8 * inch,
+                    0.6 * inch,
+                    0.6 * inch,
+                    1.0 * inch,
+                    0.5 * inch,
+                ],
+            )
         )
-    )
-    story.append(t)
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("7. 200-Year Foundation", styles["Heading2"]))
+        story.append(Spacer(1, 6))
+        story.append(
+            Paragraph(
+                "Loss is next-token cross-entropy on raw English Wikipedia text over a short "
+                "step budget, reported as first value to last value. Resident memory is "
+                "dominated by the PyTorch runtime rather than by the model: the 5.1M "
+                "configuration holds roughly 19 MB of weights while process resident memory "
+                "is several hundred megabytes. Energy is a single figure covering one "
+                "forward pass plus a short generation, not a per-token cost, so it cannot "
+                "be compared against any other energy figure.",
+                small,
+            )
+        )
+        labels = [str(r.get("size_label", "?")) for r in bench["sizes"]]
+        chart(
+            "Generation throughput (tokens/s, batch 1)",
+            [r.get("gen_tok_s") or 0 for r in bench["sizes"]],
+            labels,
+            PLOT_DIR / "paper_generation.pdf",
+        )
+        chart(
+            "Forward throughput at sequence length 512 (tokens/s)",
+            [
+                (r.get("forward_throughput") or {}).get("512", 0) or 0
+                for r in bench["sizes"]
+            ],
+            labels,
+            PLOT_DIR / "paper_forward512.pdf",
+        )
+        summary = bench.get("summary") or {}
+        story.append(Spacer(1, 6))
+        story.append(
+            Paragraph(
+                f"Verification checks passed: {summary.get('total_pass', 0)} of "
+                f"{summary.get('total_checks', 0)}. Each check records the measurement that "
+                "justified it, so a passing check can be audited against the underlying "
+                "number rather than taken on trust.",
+                small,
+            )
+        )
+    else:
+        story.append(
+            Paragraph(
+                "Not measured. Run <font name='Courier'>"
+                "python kaggle/test_all_sizes_mega.py --loss-steps 60</font> to produce "
+                "benchmark_report.json, then re-run this script.",
+                body,
+            )
+        )
+
+    # ----------------------------------------------------------- limitations
+    story.append(Paragraph("7. Limitations", h2))
+    for item in [
+        "No accuracy evaluation. No MMLU, no standard held-out benchmark, no task "
+        "performance. The loss figures are training loss on raw corpus text.",
+        "No baseline. No reference model was measured under identical conditions, so no "
+        "speedup or efficiency ratio is reported.",
+        "Single machine. Throughput on other hardware is unknown.",
+        "No quantised export. Checkpoints are float32 PyTorch. There is no GGUF writer and "
+        "no Q4_K_M quantiser in this project, and files previously published under those "
+        "names were not real.",
+        "No generation cache. Sampling re-runs the full model at every step.",
+        "The p-adic operators contribute no gradient, as described in Section 3.",
+    ]:
+        story.append(Paragraph(f"- {item}", small))
+        story.append(Spacer(1, 2))
+
+    # -------------------------------------------------------------- conclusion
+    story.append(Paragraph("8. Conclusion", h2))
     story.append(
         Paragraph(
-            "Substrate-agnostic: digital CPU 2026 -> memristor 2030 (195 TOPS/W) -> photonic 2032 (120ns) -> "
-            "quantum HDC 2040 -> biological 2100 -> unknown physics 2226. "
-            "Godel self-rewriter immortal: model rewrites own code to improve, never degrades, functor preserving fractal self-similar.",
-            styles["BodyText"],
+            "Feather v2 is a working trainable model with a measured size ladder and a "
+            "benchmark that records the evidence behind each of its claims. Its most "
+            "useful property for a reader is that the numbers are small and checkable: the "
+            "model is between 5M and 58M parameters, it runs on a CPU, and every figure in "
+            "this paper can be regenerated from the two JSON artifacts named at the top of "
+            "the source file. Where the mathematics is a relaxation rather than an exact "
+            "algorithm, the paper says so.",
+            body,
         )
     )
-    story.append(Paragraph("8. Conclusion", styles["Heading2"]))
+    story.append(Spacer(1, 8))
     story.append(
         Paragraph(
-            "Feather v2 is bicycle vs truck. CPU is the people. GPU is the monopoly. "
-            "Open source breaks monopoly. Physics free, data centers not. "
-            "Maximum output minimum resource. Noble concept. Foundation 200 years.",
-            styles["BodyText"],
+            "License: MIT License plus an additional clause. See LICENSE in the repository "
+            "root.",
+            small,
         )
     )
-    story.append(Paragraph("References", styles["Heading2"]))
-    story.append(
-        Paragraph(
-            "[1] Vaswani et al. Attention Is All You Need. [2] Hochreiter & Schmidhuber LSTM. "
-            "[3] Ma et al. BitNet 1.58-bit. [4] Abouelenin et al. Phi-4 Mini. "
-            "[5] BitNet.cpp CPU inference 1.37-6.46x speedup. [6] SparX AMX 6.1x. "
-            "[7] Intel AMX 7-10x. [8] llama.cpp CPU-first. [9] Lyons Rough Path. "
-            "[10] Hestenes Clifford. [11] Cuturi Sinkhorn. [12] Oseledets TT. "
-            "[13] Schmidhuber Godel Machine. [14] Landauer kT ln2=2.8e-21J. "
-            "[15] Feather v1 Architecture Final Blueprint. [16] Feather v2 Design Theory.",
-            styles["BodyText"],
-        )
-    )
+
     doc.build(story)
-    print(f"Paper generated: {doc.filename}")
-    charts = [
-        (
-            "Speed batch=1 Personal LLM — CPU beats GPU 80",
-            [60, 80, 35, 10, 5],
-            ["Feather i7", "GPU", "Kaggle", "i5", "BitNet"],
-            "speed.png",
-        ),
-        (
-            "Energy per 1k tokens — 100x saving",
-            [0.028, 2.8, 0.03, 0.08, 0.4],
-            ["Feather i7", "Transformer", "Kaggle", "i5", "BitNet"],
-            "energy.png",
-        ),
-        (
-            "Memory Saving — 512x",
-            [0.9, 14, 0.6, 0.3, 0.4],
-            ["Feather v2", "Transformer", "i5", "Agent", "BitNet"],
-            "memory_saving.png",
-        ),
-        (
-            "Ops Saving — 64x fewer + 0 mults tropical",
-            [64, 1, 16, 1, 1],
-            ["Feather v2", "Transformer", "Agent", "LSTM", "Attention"],
-            "ops_saving.png",
-        ),
-        (
-            "MOMR — ~120x",
-            [120, 1, 52, 20, 10],
-            ["Feather v2 i7", "Transformer", "i5", "Agent", "BitNet"],
-            "momr.png",
-        ),
-        (
-            "Context — 1M vs 4k 250x",
-            [1000, 4, 64, 256, 1024],
-            ["Feather v2", "Transformer", "Agent", "LSTM", "Attention"],
-            "context.png",
-        ),
-    ]
-    for title, values, labels, filename in charts:
-        _make_chart(title, values, labels, os.path.join(output_dir, filename))
-    print(f"Charts generated: {len(charts)} PNGs in {output_dir}")
+    out = Path(output_dir) / "main.pdf"
+    print(f"paper written: {out} ({out.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

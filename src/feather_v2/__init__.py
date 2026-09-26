@@ -2,18 +2,43 @@
 
 CPU-native, open-source, maximum output / minimum resource.
 13 mathematics + 7 components.
+
+The trainable model lives in :mod:`feather_v2.model` and requires PyTorch. The
+NumPy reference implementations in :mod:`feather_v2.utils` and
+:mod:`feather_v2.models` remain available for inference-time cross-checks.
 """
 
 from __future__ import annotations
 
 from .base import BaseComponent
 from .hardware import detect_cpu_features, get_best_kernel, summary
-from .model import FeatherV2Model
+from .model import DEFAULT_CONFIG, CognitiveBlock, FeatherV2Model, load_config
+from .nn_math import (
+    KANLinear,
+    alpha_dropout,
+    clifford_gate,
+    divisibility_profile,
+    equilibrium_update,
+    fwht,
+    godel_log_code,
+    ifwht,
+    p_adic_weights,
+    rough_path_signature,
+    sheaf_project,
+    sinkhorn,
+    tt_compress,
+    tt_factors,
+    tt_matmul,
+)
 from .utils import (
+    build_param_from_p,
     cos_sim,
+    create_param_from_p,
     hybrid_adaptive_tokenizer,
     hybrid_wht,
     normalize,
+    normalize_L2,
+    tt_clifford_reduce,
 )
 from .utils import (
     adaptive_clifford_product as clifford_product,
@@ -55,25 +80,40 @@ from .utils import kan_activation
 
 __all__ = [
     "BaseComponent",
+    "CognitiveBlock",
+    "DEFAULT_CONFIG",
     "FeatherV2Model",
-    "detect_cpu_features",
-    "get_best_kernel",
-    "summary",
+    "KANLinear",
+    "alpha_dropout",
+    "build_param_from_p",
+    "clifford_gate",
     "cos_sim",
+    "create_param_from_p",
+    "detect_cpu_features",
+    "divisibility_profile",
+    "equilibrium_update",
+    "fwht",
+    "get_best_kernel",
+    "godel_log_code",
     "hybrid_adaptive_tokenizer",
     "hybrid_wht",
+    "ifwht",
+    "load_config",
     "normalize",
+    "normalize_L2",
+    "p_adic_weights",
+    "rough_path_signature",
+    "sheaf_project",
+    "sinkhorn",
+    "summary",
+    "tt_clifford_reduce",
+    "tt_compress",
+    "tt_factors",
+    "tt_matmul",
     "clifford_product",
-    "equilibrium_update",
     "fractional_weights",
     "jacobi_decode",
     "p_adic_chunk_retrieve",
     "p_adic_distance",
-    "rough_path_signature",
-    "sheaf_consistency",
-    "sinkhorn",
-    "tropical_matmul",
-    "tropical_min",
-    "tt_compress",
     "kan_activation",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from feather_v2.utils import (
     adaptive_clifford_product,
@@ -26,6 +27,14 @@ from feather_v2.utils import (
     tt_decompress,
     wht_bind,
 )
+
+from feather_v2.utils import (
+    build_param_from_p,
+    create_param_from_p,
+    normalize_L2,
+    tt_clifford_reduce,
+)
+from feather_v2.utils import tt_compress as public_tt_compress
 
 
 def test_fwht_adds_only_and_involution():
@@ -177,3 +186,65 @@ def test_normalize_unit_norm():
     a = np.random.default_rng(0).standard_normal(64)
     n = normalize(a)
     assert np.isclose(np.linalg.norm(n), 1.0, atol=1e-12)
+
+
+def test_normalize_l2_unit_norm():
+    a = np.random.default_rng(1).standard_normal((5, 32))
+    n = normalize_L2(a, axis=-1)
+    assert np.allclose(np.linalg.norm(n, axis=-1), 1.0, atol=1e-12)
+
+
+def test_normalize_l2_leaves_zero_vectors_finite():
+    a = np.zeros((3, 8))
+    n = normalize_L2(a, axis=-1)
+    assert np.all(np.isfinite(n))
+
+
+def test_build_param_from_p_marks_exact_divisibility():
+    # p**0 = 1 divides everything; 2 divides evens; 4 divides multiples of 4.
+    profile = build_param_from_p(p=2, dim=8, levels=3)
+    assert profile.shape == (8, 3)
+    assert np.all(profile[:, 0] == 1.0)
+    assert profile[1, 1] == 0.0 and profile[2, 1] == 1.0
+    assert profile[4, 2] == 1.0 and profile[6, 2] == 0.0
+    assert set(np.unique(profile)).issubset({0.0, 1.0})
+
+
+def test_build_param_from_p_rejects_bad_primes():
+    with pytest.raises(ValueError):
+        build_param_from_p(p=1, dim=4, levels=2)
+    with pytest.raises(ValueError):
+        build_param_from_p(p=2, dim=4, levels=0)
+
+
+def test_create_param_from_p_matches_builder():
+    a = build_param_from_p(p=3, dim=16, levels=4)
+    b = create_param_from_p(p=3, dim=16, levels=4)
+    assert np.array_equal(a, b)
+
+
+def test_public_tt_compress_matches_adaptive():
+    rng = np.random.default_rng(0)
+    w = rng.standard_normal((32, 16))
+    a = public_tt_compress(w, rank=4)
+    b = adaptive_tt_compress(w, rank=4)
+    assert len(a) == len(b) == 2
+    for x, y in zip(a, b):
+        assert np.allclose(np.asarray(x), np.asarray(y))
+
+
+def test_tt_clifford_reduce_preserves_length():
+    x = np.random.default_rng(2).standard_normal(64)
+    out = tt_clifford_reduce(x, rank=4)
+    assert out.shape[0] == x.shape[0]
+    assert np.all(np.isfinite(out))
+
+
+def test_p_adic_group_is_defined_once():
+    """Two near-identical private definitions existed; the second shadowed the first."""
+    import inspect
+
+    import feather_v2.utils as utils
+
+    source = inspect.getsource(utils)
+    assert source.count("def _p_adic_group(") == 1

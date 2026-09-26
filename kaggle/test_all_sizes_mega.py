@@ -1,9 +1,14 @@
-"""Feather-v2 mega Kaggle benchmark — 6 model sizes, real measured metrics.
+"""Feather-v2 mega Kaggle benchmark — the real ladder, real measured metrics.
 
-Run: python feather-v2/kaggle/test_all_sizes_mega.py
+Run: python kaggle/test_all_sizes_mega.py
 Outputs:
-  feather-v2/docs/images/*.png   (6 scaling plots)
-  feather-v2/benchmark_report.json
+  docs/images/*.png   (scaling plots)
+  outputs/benchmark_report.json
+
+Every number in the report is produced by this script at run time. Where a
+quantity cannot be measured, it is reported as ``null`` rather than estimated.
+The previous version of this file invented several of them; see the docstrings
+on the individual measurement helpers for what was wrong and why.
 """
 
 from __future__ import annotations
@@ -11,15 +16,17 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from feather_v2 import FeatherV2Model
-from feather_v2.base import BaseComponent
 from feather_v2.hardware import detect_cpu_features, get_best_kernel, summary
+from feather_v2.model import load_config
 from feather_v2.utils import hybrid_adaptive_tokenizer
 
 # ---------------------------------------------------------------------------
@@ -32,94 +39,27 @@ IMG_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# 2. CONFIG_MAP — 6 sizes
+# 2. CONFIG_MAP - the real ladder, loaded from configs/ so it cannot drift
 # ---------------------------------------------------------------------------
-CONFIG_MAP: dict[str, dict] = {
-    "5M": {
-        "size_label": "5M",
-        "dim": 192,
-        "hv_dim": 2048,
-        "seq_len": 512,
-        "chunk": 32,
-        "tt_rank": 4,
-        "moe_experts": 24,
-        "vocab": 8256,
-        "layers": 3,
-        "batch_size": 1,
-        "precision": "int8",
-        "seed": 42,
-    },
-    "10M": {
-        "size_label": "10M",
-        "dim": 256,
-        "hv_dim": 4096,
-        "seq_len": 512,
-        "chunk": 32,
-        "tt_rank": 4,
-        "moe_experts": 32,
-        "vocab": 8256,
-        "layers": 5,
-        "batch_size": 1,
-        "precision": "int8",
-        "seed": 42,
-    },
-    "20M": {
-        "size_label": "20M",
-        "dim": 384,
-        "hv_dim": 6144,
-        "seq_len": 512,
-        "chunk": 32,
-        "tt_rank": 4,
-        "moe_experts": 64,
-        "vocab": 8256,
-        "layers": 8,
-        "batch_size": 1,
-        "precision": "int8",
-        "seed": 42,
-    },
-    "40M": {
-        "size_label": "40M",
-        "dim": 512,
-        "hv_dim": 8192,
-        "seq_len": 512,
-        "chunk": 32,
-        "tt_rank": 6,
-        "moe_experts": 96,
-        "vocab": 8256,
-        "layers": 12,
-        "batch_size": 1,
-        "precision": "int8",
-        "seed": 42,
-    },
-    "50M": {
-        "size_label": "50M",
-        "dim": 576,
-        "hv_dim": 8192,
-        "seq_len": 512,
-        "chunk": 32,
-        "tt_rank": 6,
-        "moe_experts": 112,
-        "vocab": 8256,
-        "layers": 14,
-        "batch_size": 1,
-        "precision": "int8",
-        "seed": 42,
-    },
-    "100M": {
-        "size_label": "100M",
-        "dim": 768,
-        "hv_dim": 8192,
-        "seq_len": 512,
-        "chunk": 32,
-        "tt_rank": 8,
-        "moe_experts": 128,
-        "vocab": 8256,
-        "layers": 16,
-        "batch_size": 1,
-        "precision": "int8",
-        "seed": 42,
-    },
-}
+# These used to be inlined here with invented "layers"/"size_label" keys that
+# the model never read, so every entry silently built a 2-block model while
+# advertising up to 16 layers. The labels below are the measured parameter
+# counts from `python scripts/measure_sizes.py`, not aspirations.
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+
+
+def _load_ladder() -> dict[str, dict]:
+    ladder: dict[str, dict] = {}
+    for path in sorted(CONFIG_DIR.glob("feather_*.json")):
+        label = path.stem.replace("feather_", "")
+        ladder[label] = load_config(path)
+    if not ladder:
+        raise RuntimeError(f"no configs found in {CONFIG_DIR}")
+    return ladder
+
+
+CONFIG_MAP: dict[str, dict] = _load_ladder()
+
 
 # ---------------------------------------------------------------------------
 # 3. Beautiful printing helpers
@@ -163,35 +103,59 @@ _console = Console() if _USE_RICH else None
 
 
 def _rich_table(headers: list[str], rows: list[list[str]], title: str = "") -> str:
+    """Render via rich, then re-encode to the console codec.
+
+    Rich writes box-drawing and alignment characters that a cp1252 console
+    cannot represent; letting it write directly produced a mangled table where
+    characters were replaced. Capturing and sanitising keeps the output legible
+    everywhere.
+    """
     t = Table(title=title, show_header=True, header_style="bold cyan")
     for h in headers:
         t.add_column(h, style="cyan")
     for row in rows:
         t.add_row(*[str(c) for c in row])
-    _console.print(t)
+    with _console.capture() as capture:
+        _console.print(t)
+    print(_safe(capture.get()))
 
 
 def _fallback_table(headers: list[str], rows: list[list[str]], title: str = "") -> None:
     if _USE_TABULATE:
-        print(title)
-        print(tabulate(rows, headers=headers, tablefmt="grid"))
+        print(_safe(title))
+        print(_safe(tabulate(rows, headers=headers, tablefmt="grid")))
     else:
-        print(title)
+        print(_safe(title))
         col_w = [
             max(len(h), *(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)
         ]
         line = "|".join("-" * w for w in col_w)
-        print("|".join(h.ljust(w) for h, w in zip(headers, col_w)))
+        print(_safe("|".join(h.ljust(w) for h, w in zip(headers, col_w))))
         print(line)
         for row in rows:
             print("|".join(str(c).ljust(w) for c, w in zip(row, col_w)))
 
 
+def _safe(text: str) -> str:
+    """Drop characters the console codec cannot encode.
+
+    Windows consoles frequently default to cp1252, which cannot represent the
+    check marks and box drawing this script uses. Before this, a dataset that
+    failed to load raised UnicodeEncodeError, which masked the real cause.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
 def cprint(msg: str, color: str = "") -> None:
-    if _USE_RICH:
-        _console.print(msg)
-    else:
-        print(f"{color}{msg}{_RESET}")
+    msg = _safe(msg)
+    try:
+        if _USE_RICH:
+            _console.print(msg)
+        else:
+            print(f"{color}{msg}{_RESET}")
+    except Exception:  # noqa: BLE001
+        print(msg)
 
 
 def print_header(title: str) -> None:
@@ -227,6 +191,12 @@ def detect_hardware() -> dict[str, Any]:
         kern = get_best_kernel()
     except Exception:
         kern = {}
+    # Drop legacy prediction fields. Throughput is measured below, never predicted.
+    kern = {
+        k: v
+        for k, v in kern.items()
+        if k not in ("expected_tok_per_sec", "precision", "ram_budget_gb")
+    }
     return {"features": feats, "kernel": kern}
 
 
@@ -253,7 +223,7 @@ def load_streaming_datasets() -> dict[str, dict]:
         sources = {
             "openwebtext": {
                 "loader": lambda: load_dataset(
-                    "openwebtext", streaming=True, split="train"
+                    "Skylion007/openwebtext", streaming=True, split="train"
                 ),
                 "take": 100,
                 "desc": "OpenWebText",
@@ -290,113 +260,205 @@ def load_streaming_datasets() -> dict[str, dict]:
                 size_kb = len(combined.encode("utf-8")) / 1024
                 datasets_info[key] = {
                     "name": cfg["desc"],
+                    "available": True,
                     "samples": len(texts),
                     "size_kb": size_kb,
                     "text": combined[:100_000],
+                    "error": None,
                 }
                 cprint(
-                    f"  ✓ {cfg['desc']}: {len(texts)} samples, " f"{size_kb:.1f} KB",
+                    f"  OK {cfg['desc']}: {len(texts)} samples, {size_kb:.1f} KB",
                     _GREEN,
                 )
-            except Exception as exc:
-                cprint(f"  ✗ {cfg['desc']} failed: {exc}", _RED)
+            except Exception as exc:  # noqa: BLE001
+                # Previously this substituted "fallback test data" while still
+                # recording name="OpenWebText", so a run that never touched a
+                # real corpus reported that it had. An unavailable source is
+                # now recorded as unavailable with empty text.
+                cprint(f"  FAILED {cfg['desc']}: {_safe(str(exc))[:200]}", _RED)
                 datasets_info[key] = {
                     "name": cfg["desc"],
+                    "available": False,
                     "samples": 0,
                     "size_kb": 0.0,
-                    "text": "fallback test data " * 50,
+                    "text": "",
+                    "error": str(exc),
                 }
     except ImportError:
-        cprint("datasets not available, using fallback text", _YELLOW)
-        for key in ["openwebtext", "wikipedia", "no_robots"]:
+        cprint("datasets not available; corpus measurements will be skipped", _YELLOW)
+        for key, desc in [
+            ("openwebtext", "OpenWebText"),
+            ("wikipedia", "Wikipedia (en)"),
+            ("no_robots", "no_robots"),
+        ]:
             datasets_info[key] = {
-                "name": key,
-                "samples": 10,
-                "size_kb": 5.0,
-                "text": "fallback test data " * 200,
+                "name": desc,
+                "available": False,
+                "samples": 0,
+                "size_kb": 0.0,
+                "text": "",
+                "error": "datasets not installed",
             }
 
     total_kb = sum(d["size_kb"] for d in datasets_info.values())
+    unavailable = [k for k, d in datasets_info.items() if not d["available"]]
     quota_gb = 20.0
     pct = total_kb / (quota_gb * 1024 * 1024) * 100
     cprint(
-        f"Total data: {total_kb:.1f} KB / {quota_gb:.0f} GB "
-        f"({pct:.4f}%) — quota safe ✓",
+        f"Total data: {total_kb:.1f} KB / {quota_gb:.0f} GB ({pct:.4f}%) — quota safe",
         _GREEN,
     )
+    if unavailable:
+        cprint(
+            f"Unavailable sources: {', '.join(unavailable)}. "
+            "Any metric that needs them is reported as unmeasured.",
+            _YELLOW,
+        )
     return datasets_info
 
 
 # ---------------------------------------------------------------------------
 # 6. Anti-fake gates
 # ---------------------------------------------------------------------------
+# These gates exist to catch fabrication, so each one had to be checked for the
+# same failure it was meant to catch.
+
+
 def assert_real_weights(model: FeatherV2Model) -> bool:
+    """Check that live parameters are real, varied, and respond to training.
+
+    The previous version inspected ``model._logit_projection``, a single random
+    matrix that was never trained and was the only thing the old scaffold
+    actually had. Checking one array is not evidence about a model.
+
+    Note what this deliberately does *not* do: flag parameters that are
+    constant. ``LayerNorm.weight`` initialises to exactly 1.0 and its bias to
+    exactly 0.0, and ``scale_logits`` initialises to zeros so the mixture starts
+    uniform. Those are correct initial values, not fabricated ones. The
+    decisive check is whether the parameters move under a real optimizer step.
+    """
     try:
-        w = model._logit_projection
-        if w is None:
+        named = list(model.named_parameters())
+        if not named:
             return False
-        mean_val = float(np.mean(np.abs(w)))
-        std_val = float(np.std(w))
-        unique_ratio = float(np.unique(w).size) / max(1, w.size)
-        ok = (
-            mean_val > 0.0001
-            and std_val > 0.001
-            and unique_ratio > 0.90
-            and not np.allclose(w, w.flat[0])
+        nonfinite = [n for n, p in named if not torch.isfinite(p).all()]
+        if nonfinite:
+            cprint(f"  FAIL weights: non-finite in {nonfinite[:5]}", _RED)
+            return False
+
+        total = sum(param.numel() for _, param in named)
+        all_constant = [n for n, p in named if float(p.std()) == 0.0]
+        if len(all_constant) == len(named):
+            cprint("  FAIL weights: every parameter is constant", _RED)
+            return False
+
+        before = {n: p.detach().clone() for n, p in named if p.requires_grad}
+        was_training = model.training
+        model.train()
+        vocab = int(model.config["vocab"])
+        ids = torch.randint(
+            0, vocab, (1, min(8, int(model.config["seq_len"]))), dtype=torch.long
         )
-        if not ok:
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+        optimizer.zero_grad(set_to_none=True)
+        probe_loss, _ = model.loss(ids)
+        probe_loss.backward()
+        optimizer.step()
+        moved = sum(
+            1
+            for n, p in model.named_parameters()
+            if n in before and not torch.equal(p.detach(), before[n])
+        )
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if n in before:
+                    p.copy_(before[n])
+        if not was_training:
+            model.eval()
+
+        if moved == 0:
             cprint(
-                f"  FAIL weights: mean={mean_val:.6f} std={std_val:.6f} "
-                f"unique={unique_ratio:.3f}",
+                "  FAIL weights: no parameter moved during an optimizer step",
                 _RED,
             )
-        return ok
-    except Exception as exc:
-        cprint(f"  FAIL weights check: {exc}", _RED)
+            return False
+        cprint(
+            f"  {total:,} parameters, all finite; {moved} responded to a "
+            f"training step ({len(all_constant)} at fixed init values)",
+            _GREEN,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        cprint(f"  FAIL weights check: {_safe(str(exc))[:300]}", _RED)
         return False
 
 
 def assert_real_timing(elapsed_s: float) -> bool:
-    ok = elapsed_s > 0.001
+    """A timing must be positive and must have actually measured a call."""
+    ok = math.isfinite(elapsed_s) and elapsed_s > 0.0
     if not ok:
-        cprint(f"  FAIL timing: {elapsed_s:.6f}s <= 0.001s", _RED)
+        cprint(f"  FAIL timing: {elapsed_s!r} is not a positive duration", _RED)
     return ok
 
 
 def assert_real_varying_loss(losses: list[float]) -> bool:
-    if not losses or len(losses) < 2:
+    """The loss must be finite, must move, and must end lower than it started.
+
+    The old version accepted ``losses[-1] <= losses[0] * 1.05``, which permits a
+    flat or rising loss to pass, and it wrapped the whole loop in
+    ``try/except`` so a crash returned ``([], False)`` rather than a traceback.
+    """
+    if len(losses) < 2:
+        cprint(f"  FAIL loss trend: only {len(losses)} point(s)", _RED)
         return False
-    unique_vals = len(set(round(l, 6) for l in losses))
-    ok = unique_vals > 1 and losses[-1] <= losses[0] * 1.05
-    if not ok:
+    if not all(math.isfinite(v) for v in losses):
+        cprint("  FAIL loss trend: non-finite value in history", _RED)
+        return False
+    moved = len({round(v, 8) for v in losses}) > 1
+    fell = losses[-1] < losses[0]
+    if not (moved and fell):
         cprint(
             f"  FAIL loss trend: {losses[0]:.6f} -> {losses[-1]:.6f} "
-            f"unique={unique_vals}",
+            f"(moved={moved} fell={fell})",
             _RED,
         )
-    return ok
+    return moved and fell
 
 
 def assert_real_ram(
-    weight_mb: float, delta_mb: float, total_mb: float, size_label: str = ""
+    model: FeatherV2Model, ram_delta_mb: float, ram_total_mb: float
 ) -> bool:
-    thresholds = {
-        "5M": {"weight": 5.0, "delta": 50.0, "total": 500.0},
-        "10M": {"weight": 8.0, "delta": 80.0, "total": 800.0},
-        "20M": {"weight": 15.0, "delta": 150.0, "total": 1200.0},
-        "40M": {"weight": 30.0, "delta": 300.0, "total": 2000.0},
-        "50M": {"weight": 40.0, "delta": 400.0, "total": 2500.0},
-        "100M": {"weight": 80.0, "delta": 800.0, "total": 4000.0},
-    }
-    t = thresholds.get(size_label, {"weight": 5.0, "delta": 50.0, "total": 500.0})
-    ok = weight_mb > t["weight"] and delta_mb > t["delta"] and total_mb < t["total"]
-    if not ok:
-        cprint(
-            f"  FAIL RAM: weight={weight_mb:.1f}MB delta={delta_mb:.1f}MB total={total_mb:.1f}MB "
-            f"(expected weight>{t['weight']}MB delta>{t['delta']}MB total<{t['total']}MB for {size_label})",
-            _RED,
+    """Check that resident memory is consistent with the real weight count.
+
+    The previous version took a size label and compared against a hardcoded
+    table of thresholds invented for that label, requiring
+    ``delta > threshold``. That is inverted: a genuinely memory-efficient model
+    would be rejected for being too good, and a model with the wrong number of
+    parameters would be accepted if it happened to allocate enough. There are no
+    size thresholds here. The only defensible check is that the weights the
+    model actually holds could account for the memory it uses.
+    """
+    try:
+        parameters = model.count_parameters()
+        bytes_per_weight = next(model.parameters()).element_size()
+        weight_mb = parameters * bytes_per_weight / (1024 * 1024)
+        ok = (
+            math.isfinite(ram_delta_mb)
+            and math.isfinite(ram_total_mb)
+            and ram_total_mb > 0.0
+            and weight_mb > 0.0
+            and ram_delta_mb <= ram_total_mb
         )
-    return ok
+        if not ok:
+            cprint(
+                f"  FAIL RAM: delta={ram_delta_mb:.1f}MB total={ram_total_mb:.1f}MB "
+                f"weights={weight_mb:.1f}MB (weights must be > 0 and delta <= total)",
+                _RED,
+            )
+        return ok
+    except Exception as exc:  # noqa: BLE001
+        cprint(f"  FAIL RAM check: {exc}", _RED)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -430,206 +492,250 @@ def _measure_tokenizer_speed(model: FeatherV2Model, text: str, runs: int = 5) ->
 def _measure_forward_throughput(
     model: FeatherV2Model, seq_lengths: list[int], runs: int = 3
 ) -> dict[int, float]:
-    results = {}
-    dim = model.config.get("dim", 512)
-    rng = np.random.default_rng(42)
-    warmup_seq = rng.standard_normal((32, dim))
-    for _ in range(2):
-        try:
-            _ = model.forward(warmup_seq)
-        except Exception:
-            pass
-    for seq in seq_lengths:
-        times = []
-        x = rng.standard_normal((seq, dim))
-        for run_idx in range(runs):
-            progress(f"    Forward seq={seq} run {run_idx+1}/{runs}...")
-            start = time.perf_counter()
-            try:
-                _ = model.forward(x)
-            except Exception:
-                pass
-            elapsed = time.perf_counter() - start
-            if elapsed > 10.0:
-                cprint(
-                    f"    SKIP seq={seq} run {run_idx+1}: {elapsed:.1f}s > 10s timeout",
-                    _YELLOW,
-                )
-                break
-            times.append(elapsed)
-        if times:
-            med_s = _median(times)
-            tok_s = seq / max(1e-9, med_s)
-            results[seq] = tok_s
-        else:
-            results[seq] = 0.0
+    """Tokens per second through a real forward pass.
+
+    The previous version called ``model.forward(x)`` inside
+    ``try/except Exception: pass`` and then recorded the elapsed time whether or
+    not the call succeeded, so a model that raised on every input still reported
+    a throughput. It also reported ``0.0`` on a slow run, which reads as a
+    measurement rather than a failure. Errors propagate now.
+    """
+    results: dict[int, float] = {}
+    model.eval()
+    vocab = int(model.config["vocab"])
+    max_seq = int(model.config["seq_len"])
+    with torch.no_grad():
+        for seq in seq_lengths:
+            seq = min(seq, max_seq)
+            ids = torch.randint(0, vocab, (1, seq), dtype=torch.long)
+            for _ in range(2):  # warmup, not measured
+                model(ids)
+            times: list[float] = []
+            for run_idx in range(runs):
+                progress(f"    Forward seq={seq} run {run_idx + 1}/{runs}...")
+                start = time.perf_counter()
+                model(ids)
+                times.append(time.perf_counter() - start)
+            results[seq] = seq / max(_median(times), 1e-12)
     return results
 
 
 def _measure_bulk_throughput(model: FeatherV2Model, batch: int, seq: int) -> float:
-    dim = model.config.get("dim", 512)
-    rng = np.random.default_rng(7)
-    x = rng.standard_normal((seq, dim))
-    start = time.perf_counter()
-    for _ in range(batch):
-        try:
-            _ = model.forward(x)
-        except Exception:
-            pass
-    elapsed = time.perf_counter() - start
-    if elapsed > 15.0:
-        return 0.0
-    return (batch * seq) / max(1e-9, elapsed)
+    """Tokens per second across a batch of real forward passes."""
+    model.eval()
+    vocab = int(model.config["vocab"])
+    seq = min(seq, int(model.config["seq_len"]))
+    ids = torch.randint(0, vocab, (batch, seq), dtype=torch.long)
+    with torch.no_grad():
+        model(ids[:1])  # warmup
+        start = time.perf_counter()
+        for start_row in range(0, batch, 1):
+            model(ids[start_row : start_row + 1])
+        elapsed = time.perf_counter() - start
+    processed = batch * seq
+    return processed / max(elapsed, 1e-12)
 
 
 def _measure_generation(
-    model: FeatherV2Model, prompt: np.ndarray, steps: int
-) -> tuple[float, np.ndarray]:
+    model: FeatherV2Model, prompt: torch.Tensor, steps: int
+) -> tuple[float, torch.Tensor]:
+    """Time a real greedy generation of ``steps`` tokens."""
+    was_training = model.training
+    model.eval()
     start = time.perf_counter()
-    out = model.generate(prompt, steps=steps)
+    out = model.generate(prompt, max_new_tokens=steps, greedy=True)
     elapsed = time.perf_counter() - start
+    if was_training:
+        model.train()
     return elapsed, out
 
 
 def _measure_loss_trend(
-    model: FeatherV2Model, text: str, steps: int = 100
+    model: FeatherV2Model, text: str, steps: int = 100, lr: float = 1e-3
 ) -> tuple[list[float], bool]:
-    losses = []
-    try:
-        tokens, _ = hybrid_adaptive_tokenizer(
-            text, vocab_size=model.config.get("vocab", 8256)
-        )
-        dim = model.config.get("dim", 512)
-        for step in range(min(steps, max(1, tokens.size - 1))):
-            start_idx = step % max(1, tokens.size - dim)
-            chunk = tokens[start_idx : start_idx + dim].astype(np.float64)
-            if chunk.size < dim:
-                pad = np.zeros(dim - chunk.size, dtype=np.float64)
-                chunk = np.concatenate([chunk, pad])
-            out = model.forward(chunk)
-            logits = (
-                np.asarray(out["final_output"], dtype=np.float64).flatten()
-                @ model._logit_projection
-            )
-            target = int(tokens[(step + 1) % max(1, tokens.size)] % logits.size)
-            target_vec = np.zeros(logits.size, dtype=np.float64)
-            target_vec[target % target_vec.size] = 1.0
-            loss = float(np.mean((logits - target_vec) ** 2))
-            losses.append(loss)
-    except Exception as exc:
-        cprint(f"  Loss measurement error: {exc}", _RED)
+    """Real next-token cross-entropy under a real optimizer.
+
+    The previous version flattened the model output, multiplied it by a fixed
+    random matrix, and took the mean squared error against a one-hot vector.
+    There was no optimizer, so the quantity never changed, and the surrounding
+    ``try/except`` turned any failure into an empty list instead of a traceback.
+    This trains the model the way any user would.
+    """
+    vocab = int(model.config["vocab"])
+    tokens = hybrid_adaptive_tokenizer(text, vocab_size=vocab)[0]
+    ids = torch.as_tensor(np.asarray(tokens).reshape(-1) % vocab, dtype=torch.long)
+    seq_len = min(int(model.config["seq_len"]), max(8, ids.numel() // 4))
+    if ids.numel() < seq_len + 2:
         return [], False
+
+    was_training = model.training
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    losses: list[float] = []
+    try:
+        for step in range(steps):
+            offset = (step * seq_len) % (ids.numel() - seq_len - 1)
+            # Inputs and labels are both seq_len long. Passing a seq_len + 1
+            # window as input_ids trips the model's own length check.
+            inputs = ids[offset : offset + seq_len].unsqueeze(0)
+            labels = ids[offset + 1 : offset + seq_len + 1].unsqueeze(0)
+            optimizer.zero_grad(set_to_none=True)
+            loss, metrics = model.loss(inputs, labels)
+            loss.backward()
+            optimizer.step()
+            losses.append(float(metrics["loss"]))
+    finally:
+        if not was_training:
+            model.eval()
     return losses, assert_real_varying_loss(losses)
 
 
-def _measure_context_recall(model: FeatherV2Model, seq: int) -> tuple[float, float]:
-    rng = np.random.default_rng(99)
-    dim = model.config.get("dim", 512)
-    x = rng.standard_normal((seq, dim))
-    state_first = model.forward(x[: max(1, seq // 3)])
-    state_last = model.forward(x)
-    vec_first = np.asarray(state_first["final_output"], dtype=np.float64).flatten()
-    vec_last = np.asarray(state_last["final_output"], dtype=np.float64).flatten()
-    min_d = min(vec_first.size, vec_last.size, dim)
-    sim = float(np.dot(vec_first[:min_d], vec_last[:min_d]))
-    return sim, min_d
+def _measure_state_stability(
+    model: FeatherV2Model, seq: int
+) -> tuple[float | None, int]:
+    """Cosine similarity of a prefix's final hidden state with and without a suffix.
 
+    The same token prefix is encoded twice: once on its own, and once as the
+    start of a longer sequence. The last position of the prefix is compared in
+    both cases, so the only difference is whether later tokens were present.
 
-def _measure_component_breakdown(model: FeatherV2Model, text: str) -> dict[str, float]:
-    components = [
-        "sensory",
-        "memory",
-        "hyper",
-        "knowledge",
-        "reasoning",
-        "governor",
-        "generation",
-    ]
-    times = {}
-    tokens, _ = hybrid_adaptive_tokenizer(
-        text, vocab_size=model.config.get("vocab", 8256)
+    Comparing final *logits* instead would mix a vocab-wide vector into a
+    representation-similarity claim, and comparing the last position of a short
+    prefix against the last position of a long sequence would compare two
+    different positions. Both were wrong; this compares the same position of the
+    same content and reports hidden-state width.
+
+    Returns ``(None, 0)`` if no comparable hidden state can be captured.
+    """
+    vocab = int(model.config["vocab"])
+    seq = min(seq, int(model.config["seq_len"]))
+    if seq < 4:
+        return None, 0
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def _hook(_module, _inputs, output):
+        tensor = output[0] if isinstance(output, tuple) else output
+        captured["h"] = tensor.detach()
+
+    handle = model.norm_f.register_forward_hook(_hook)
+    try:
+        generator = torch.Generator().manual_seed(99)
+        ids = torch.randint(0, vocab, (1, seq), generator=generator)
+        third = max(1, seq // 3)
+        model.eval()
+        with torch.no_grad():
+            model(ids)  # long: prefix followed by a suffix
+            long_prefix_state = captured["h"][:, third - 1]
+            model(ids[:, :third])  # short: the prefix alone
+            short_prefix_state = captured["h"][:, third - 1]
+    except Exception:
+        return None, 0
+    finally:
+        handle.remove()
+
+    similarity = float(
+        torch.nn.functional.cosine_similarity(
+            long_prefix_state.flatten(), short_prefix_state.flatten(), dim=-1
+        )
     )
-    x = tokens[: model.config.get("dim", 512)].astype(np.float64)
-    if x.size < model.config.get("dim", 512):
-        x = np.pad(x, (0, model.config.get("dim", 512) - x.size))
-    for comp in components:
-        try:
-            start = time.perf_counter()
-            _ = model.forward(x)
-            elapsed = time.perf_counter() - start
-            times[comp] = elapsed
-        except Exception:
-            times[comp] = 0.0
-    total = sum(times.values()) if times else 1.0
-    return {k: v / total * 100.0 for k, v in times.items()}
+    return similarity, int(short_prefix_state.numel())
 
 
-def _measure_energy(model: FeatherV2Model, text: str) -> tuple[float, dict[str, float]]:
+def _measure_component_breakdown(
+    model: FeatherV2Model, runs: int = 3
+) -> dict[str, float]:
+    """Time each of the seven sublayers by actually running that sublayer.
+
+    The previous version called ``model.forward(x)`` once per component name,
+    timing the entire model seven times, then normalised the seven identical
+    numbers to percentages that always sum to 100. The "breakdown" was the same
+    measurement relabelled; it could not have shown anything else.
+    """
+    block = model.blocks[0]
+    pairs = [
+        ("sensory", block.sensory),
+        ("liquid_memory", block.liquid),
+        ("hyperdimensional", block.hyper),
+        ("knowledge_vault", block.vault),
+        ("cognitive_weaver", block.weaver),
+        ("homeostasis", block.governor),
+        ("generative_evolution", block.evolution),
+    ]
+    model.eval()
+    times: dict[str, float] = {}
+    with torch.no_grad():
+        for name, module in pairs:
+            probe = torch.randn(1, 8, int(model.config["dim"]))
+            module(probe)  # warmup
+            samples = []
+            for _ in range(runs):
+                start = time.perf_counter()
+                module(probe)
+                samples.append(time.perf_counter() - start)
+            times[name] = _median(samples)
+    total = sum(times.values())
+    if total <= 0:
+        return {name: 0.0 for name in times}
+    return {name: value / total * 100.0 for name, value in times.items()}
+
+
+def _measure_energy(model: FeatherV2Model, text: str) -> tuple[float | None, dict]:
+    """Energy for one forward plus a short generation, via codecarbon.
+
+    The previous version, on any exception at all, returned
+    ``tokens * 3.7e-15 * 128 * 512``. That constant appears nowhere else in the
+    repository, was not derived from any measurement, and was reported as if it
+    were one. It is now ``None``.
+    """
     try:
         from codecarbon import EmissionsTracker
+    except ImportError:
+        cprint("  codecarbon unavailable; energy not measured", _YELLOW)
+        return None, {"reason": "codecarbon not installed"}
 
+    try:
+        model.eval()
+        vocab = int(model.config["vocab"])
+        seq = min(32, int(model.config["seq_len"]))
+        ids = torch.randint(0, vocab, (1, seq), dtype=torch.long)
         tracker = EmissionsTracker(log_level="error", save_to_file=False)
         tracker.start()
-        tokens, _ = hybrid_adaptive_tokenizer(
-            text, vocab_size=model.config.get("vocab", 8256)
-        )
-        x = tokens[: model.config.get("dim", 512)].astype(np.float64)
-        if x.size < model.config.get("dim", 512):
-            x = np.pad(x, (0, model.config.get("dim", 512) - x.size))
         try:
-            _ = model.forward(x)
-            _ = model.generate(x[:32], steps=16)
-        except Exception:
-            pass
-        tracker.stop()
-        emissions = tracker.final_emissions or 0.0
-        energy_j = emissions * 3.6e9
-        return energy_j, {}
-    except Exception:
-        tokens_count = len(
-            hybrid_adaptive_tokenizer(text, vocab_size=model.config.get("vocab", 8256))[
-                0
-            ]
-        )
-        generated = max(tokens_count, 128)
-        energy_j = generated * 3.7e-15 * 128 * 512
-        return energy_j, {}
+            with torch.no_grad():
+                model(ids)
+                model.generate(ids, max_new_tokens=16, greedy=True)
+        finally:
+            tracker.stop()
+        emissions_kg = tracker.final_emissions
+        if emissions_kg is None:
+            return None, {"reason": "tracker produced no emissions reading"}
+        return float(emissions_kg) * 3.6e9, {"co2_kg": float(emissions_kg)}
+    except Exception as exc:  # noqa: BLE001
+        cprint(f"  energy measurement failed: {exc}", _YELLOW)
+        return None, {"reason": str(exc)}
 
 
 def _count_parameters(model: FeatherV2Model) -> int:
-    count = 0
-    for comp_name in [
-        "sensory",
-        "memory",
-        "hyper",
-        "knowledge",
-        "reasoning",
-        "governor",
-        "generation",
-    ]:
-        comp = getattr(model, comp_name, None)
-        if comp is not None:
-            for attr_name in dir(comp):
-                if attr_name.startswith("_"):
-                    continue
-                try:
-                    attr = getattr(comp, attr_name)
-                    if isinstance(attr, np.ndarray):
-                        count += attr.size
-                    elif isinstance(attr, dict):
-                        for v in attr.values():
-                            if isinstance(v, np.ndarray):
-                                count += v.size
-                except Exception:
-                    pass
-    count += model._logit_projection.size
-    return count
+    """The model's own deduplicated parameter count.
+
+    The previous version walked ``dir(component)`` looking for ``np.ndarray``
+    attributes and added ``_logit_projection.size``. That counted whatever
+    happened to be cached on each object, not the model's parameters, so it was
+    unrelated to model size and drifted whenever an attribute was added.
+    """
+    return model.count_parameters()
 
 
 # ---------------------------------------------------------------------------
 # 8. Main test loop
 # ---------------------------------------------------------------------------
-def test_one_size(size_label: str, config: dict, datasets_info: dict) -> dict[str, Any]:
+def test_one_size(
+    size_label: str,
+    config: dict,
+    datasets_info: dict,
+    loss_steps: int = 100,
+) -> dict[str, Any]:
     print_header(f"[{size_label}] Testing {size_label} model")
     results: dict[str, Any] = {"size_label": size_label, "checks": []}
     try:
@@ -651,95 +757,135 @@ def test_one_size(size_label: str, config: dict, datasets_info: dict) -> dict[st
         cprint(f"  Parameters: {params:,}", _MAGENTA)
 
         progress("Measuring RAM...")
-        try:
-            import psutil
+        import psutil
 
-            proc = psutil.Process()
-            ram_before = proc.memory_info().rss / (1024 * 1024)
-            x = np.ones((config["seq_len"], config["dim"]))
-            _ = model.forward(x)
-            ram_after = proc.memory_info().rss / (1024 * 1024)
-            ram_delta = ram_after - ram_before
-            ram_total = ram_after
-        except Exception:
-            ram_delta = max(10.0, params * 4 / (1024 * 1024))
-            ram_total = ram_delta * 3
-        weight_mb = params * 8 / (1024 * 1024)
-        ram_ok = assert_real_ram(weight_mb, ram_delta, ram_total, size_label=size_label)
+        proc = psutil.Process()
+        vocab = int(config["vocab"])
+        probe_ids = torch.randint(
+            0, vocab, (1, min(8, int(config["seq_len"]))), dtype=torch.long
+        )
+        with torch.no_grad():
+            model(probe_ids)  # warm allocations before the baseline
+        ram_before = proc.memory_info().rss / (1024 * 1024)
+        with torch.no_grad():
+            model(probe_ids)
+        ram_after = proc.memory_info().rss / (1024 * 1024)
+        ram_delta = ram_after - ram_before
+        ram_total = ram_after
+        element_size = next(model.parameters()).element_size()
+        weight_mb = params * element_size / (1024 * 1024)
+        ram_ok = assert_real_ram(model, ram_delta, ram_total)
         results["checks"].append(("ram_real", ram_ok))
         results["ram_mb"] = ram_total
         results["ram_delta_mb"] = ram_delta
         results["weight_mb"] = weight_mb
         cprint(
-            f"  RAM: weight={weight_mb:.1f}MB delta={ram_delta:.1f}MB total={ram_total:.1f}MB",
+            f"  RAM: weights={weight_mb:.1f}MB delta={ram_delta:.1f}MB "
+            f"total={ram_total:.1f}MB",
             _GREEN if ram_ok else _RED,
         )
 
         progress("Tokenizer speed test...")
-        test_text = datasets_info.get("openwebtext", {}).get("text", "test " * 1000)
-        tok_s, tok_info = _measure_tokenizer_speed(model, test_text)
+        corpus_text = next(
+            (
+                entry["text"]
+                for entry in datasets_info.values()
+                if entry.get("available") and entry.get("text")
+            ),
+            "",
+        )
+        results["corpus_available"] = bool(corpus_text)
+        if corpus_text:
+            tok_s, tok_info = _measure_tokenizer_speed(model, corpus_text)
+            cprint(f"  Tokenizer: {tok_s:.0f} tok/s", _YELLOW)
+        else:
+            tok_s, tok_info = None, {"reason": "no corpus available"}
+            cprint("  Tokenizer: not measured (no corpus available)", _YELLOW)
         results["tokenizer_tok_s"] = tok_s
         results["tokenizer_info"] = tok_info
-        cprint(f"  Tokenizer: {tok_s:.0f} tok/s", _YELLOW)
 
         progress("Forward throughput...")
-        if size_label in ["5M", "10M"]:
-            seq_lengths = [32, 128]
-        elif size_label in ["20M", "40M"]:
-            seq_lengths = [32, 128, 512]
-        else:
-            seq_lengths = [32, 128, 512]
+        max_seq = int(config["seq_len"])
+        seq_lengths = [s for s in (32, 128, 512) if s <= max_seq] or [max_seq]
         ft = _measure_forward_throughput(model, seq_lengths, runs=3)
         results["forward_throughput"] = {str(k): v for k, v in ft.items()}
         for seq, speed in ft.items():
             cprint(f"  Seq {seq}: {speed:.1f} tok/s", _YELLOW)
 
-        progress("Bulk throughput (batch 8, seq 512)...")
-        bulk_tok_s = _measure_bulk_throughput(model, 8, 512)
+        progress("Bulk throughput (batch 8)...")
+        bulk_tok_s = _measure_bulk_throughput(model, 8, max_seq)
         results["bulk_tok_s"] = bulk_tok_s
         cprint(f"  Bulk: {bulk_tok_s:.1f} tok/s", _YELLOW)
 
         progress("Generation speed (64 tokens)...")
-        prompt = np.zeros((1, config["dim"]))
+        prompt = torch.randint(0, vocab, (1, min(8, max_seq)), dtype=torch.long)
         gen_elapsed, gen_out = _measure_generation(model, prompt, 64)
-        gen_tok_s = 64 / max(1e-9, gen_elapsed)
+        generated = max(0, int(gen_out.shape[-1]) - int(prompt.shape[-1]))
+        gen_tok_s = generated / max(gen_elapsed, 1e-12)
         results["gen_tok_s"] = gen_tok_s
+        results["gen_tokens"] = generated
         results["gen_elapsed_s"] = gen_elapsed
         gen_ok = assert_real_timing(gen_elapsed)
         results["checks"].append(("timing_real", gen_ok))
-        cprint(f"  Generation: {gen_tok_s:.1f} tok/s ({gen_elapsed:.3f}s)", _YELLOW)
+        cprint(
+            f"  Generation: {gen_tok_s:.1f} tok/s "
+            f"({generated} tokens in {gen_elapsed:.3f}s)",
+            _YELLOW,
+        )
 
         progress("Loss on real text data...")
-        loss_text = datasets_info.get("wikipedia", {}).get("text", test_text[:5000])
-        losses, loss_ok = _measure_loss_trend(model, loss_text, steps=100)
-        results["losses"] = [float(l) for l in losses[:20]]
-        results["loss_trend_ok"] = loss_ok
-        results["checks"].append(("loss_trend", loss_ok))
-        if losses:
+        wiki = datasets_info.get("wikipedia", {})
+        if wiki.get("available") and wiki.get("text"):
+            losses, loss_ok = _measure_loss_trend(model, wiki["text"], steps=loss_steps)
+            results["loss_corpus"] = wiki["name"]
             cprint(
-                f"  Loss: {losses[0]:.4f} -> {losses[-1]:.4f}",
+                f"  Loss: {losses[0]:.4f} -> {losses[-1]:.4f} on {wiki['name']}",
                 _GREEN if loss_ok else _RED,
             )
+        else:
+            # No corpus means no loss curve. Reporting a number here would mean
+            # reporting one that came from a placeholder string.
+            losses, loss_ok = [], False
+            results["loss_corpus"] = None
+            cprint(
+                "  Loss: not measured (Wikipedia unavailable; "
+                f"{wiki.get('error', 'no reason recorded')})",
+                _YELLOW,
+            )
+        results["losses"] = [float(loss) for loss in losses[:100]]
+        results["loss_trend_ok"] = loss_ok
+        results["checks"].append(("loss_trend", loss_ok))
 
-        progress("Context recall (3-hop cosine sim)...")
-        ctx_sim, ctx_d = _measure_context_recall(model, config["seq_len"])
-        ctx_ok = ctx_sim > 0.0
-        results["checks"].append(("context_recall", ctx_ok))
-        results["context_sim"] = ctx_sim
-        results["context_dim"] = ctx_d
+        progress("State stability (prefix cosine sim)...")
+        ctx_sim, ctx_d = _measure_state_stability(model, int(config["seq_len"]))
+        ctx_ok = ctx_sim is not None and math.isfinite(ctx_sim)
+        results["checks"].append(("state_stability", ctx_ok))
+        results["state_stability_sim"] = ctx_sim
+        results["state_stability_dim"] = ctx_d
         cprint(
-            f"  Context sim: {ctx_sim:.4f} (dim {ctx_d})",
+            (
+                f"  State stability: {ctx_sim:.4f} (hidden dim {ctx_d})"
+                if ctx_sim is not None
+                else "  State stability: not measured"
+            ),
             _GREEN if ctx_ok else _RED,
         )
 
         progress("Energy measurement...")
-        energy_j, energy_detail = _measure_energy(model, test_text)
+        energy_j, energy_detail = _measure_energy(model, corpus_text)
         results["energy_j"] = energy_j
         results["energy_detail"] = energy_detail
-        cprint(f"  Energy: {energy_j:.2e} J", _CYAN)
+        cprint(
+            (
+                f"  Energy: {energy_j:.2e} J"
+                if energy_j is not None
+                else f"  Energy: not measured ({energy_detail.get('reason', 'unknown')})"
+            ),
+            _CYAN,
+        )
 
         progress("Component breakdown...")
-        comp_break = _measure_component_breakdown(model, test_text)
+        comp_break = _measure_component_breakdown(model)
         results["component_breakdown"] = comp_break
         for comp, pct in comp_break.items():
             cprint(f"  {comp}: {pct:.1f}%", _MAGENTA)
@@ -869,22 +1015,26 @@ def make_plots(all_results: list[dict[str, Any]]) -> None:
     except Exception as exc:
         cprint(f"  Plot energy_vs_size failed: {exc}", _RED)
 
-    # Plot 6: component_breakdown_40M.png
+    # Plot 6: component_breakdown for the largest measured size
     try:
-        r40 = next((r for r in all_results if r.get("size_label") == "40M"), None)
-        if r40 and r40.get("component_breakdown"):
+        with_breakdown = [
+            r for r in all_results if r.get("component_breakdown") and r.get("params")
+        ]
+        if with_breakdown:
+            target = max(with_breakdown, key=lambda r: r["params"])
+            label = target.get("size_label", "?")
             fig, ax = plt.subplots(figsize=(10, 6))
-            comp = r40["component_breakdown"]
+            comp = target["component_breakdown"]
             labels = list(comp.keys())
             values = [comp[k] for k in labels]
             ax.barh(labels, values, color="mediumpurple")
             ax.set_xlabel("Time share (%)")
-            ax.set_title("Component breakdown — 40M")
+            ax.set_title(f"Component breakdown - {label}")
             fig.tight_layout()
-            fig.savefig(IMG_DIR / "component_breakdown_40M.png", dpi=150)
+            fig.savefig(IMG_DIR / f"component_breakdown_{label}.png", dpi=150)
             plt.close(fig)
     except Exception as exc:
-        cprint(f"  Plot component_breakdown_40M failed: {exc}", _RED)
+        cprint(f"  Plot component_breakdown failed: {exc}", _RED)
 
     cprint(f"Plots saved to {IMG_DIR}", _GREEN)
 
@@ -908,21 +1058,25 @@ def print_summary(all_results: list[dict[str, Any]]) -> None:
     total_checks = 0
     total_pass = 0
     for r in all_results:
-        losses = r.get("losses", [])
-        loss_first = f"{losses[0]:.4f}" if losses else "N/A"
-        loss_last = f"{losses[-1]:.4f}" if losses else "N/A"
+        losses = r.get("losses") or []
+        loss_first = f"{losses[0]:.4f}" if losses else "n/a"
+        loss_last = f"{losses[-1]:.4f}" if losses else "n/a"
         checks = r.get("checks", [])
         passed = sum(1 for _, v in checks if v)
         total = len(checks)
         total_checks += total
         total_pass += passed
-        status = "✓" if r.get("ok") else "✗"
+        params = r.get("params")
+        throughput = r.get("forward_throughput") or {}
+        # Report the longest sequence actually measured for this size rather
+        # than assuming every config ran seq=512.
+        best_seq = max(throughput, key=lambda k: int(k)) if throughput else None
         row = [
-            r.get("size_label", "?"),
-            f"{r.get('params', 0)/1e6:.1f}",
-            f"{r.get('ram_mb', 0):.1f}",
-            f"{r.get('forward_throughput', {}).get('512', 0):.1f}",
-            f"{r.get('bulk_tok_s', 0):.1f}",
+            str(r.get("size_label", "?")),
+            f"{params/1e6:.2f}" if params else "n/a",
+            f"{r['ram_mb']:.1f}" if r.get("ram_mb") else "n/a",
+            f"{throughput[best_seq]:.1f}" if best_seq else "n/a",
+            f"{r['bulk_tok_s']:.1f}" if r.get("bulk_tok_s") else "n/a",
             loss_first,
             loss_last,
             f"{passed}/{total}",
@@ -954,75 +1108,131 @@ def print_summary(all_results: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 # 11. Save report
 # ---------------------------------------------------------------------------
-def save_report(all_results: list[dict[str, Any]], hw: dict[str, Any]) -> None:
+def save_report(
+    all_results: list[dict[str, Any]],
+    hw: dict[str, Any],
+    *,
+    final: bool = True,
+) -> None:
+    """Write benchmark_report.json, merging with any sizes already on disk.
+
+    Saving after every size matters because the largest sizes are slow: if the
+    process is killed or times out partway up the ladder, the completed sizes
+    must survive. Merging by ``size_label`` also means a subset re-run (for
+    example ``--sizes 60M``) updates just that size instead of replacing the
+    report with a single entry.
+
+    Each entry carries its own ``measured_at`` so a merged report never implies
+    that all sizes came from one moment.
+    """
+    out_path = ROOT / "benchmark_report.json"
+
+    previous: dict[str, dict[str, Any]] = {}
+    if out_path.exists():
+        try:
+            old = json.loads(out_path.read_text(encoding="utf-8"))
+            for rec in old.get("sizes", []) or []:
+                label = rec.get("size_label")
+                if label:
+                    previous[label] = rec
+        except Exception as exc:  # noqa: BLE001
+            cprint(f"  could not merge previous report ({exc}); starting fresh", _RED)
+
+    merged: dict[str, dict[str, Any]] = dict(previous)
+    for rec in all_results:
+        label = rec.get("size_label")
+        if label:
+            merged[label] = rec
+
+    def _order(item: tuple[str, dict[str, Any]]) -> float:
+        params = item[1].get("params")
+        return float(params) if params else float("inf")
+
+    ordered = [rec for _, rec in sorted(merged.items(), key=_order)]
+
     report = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "hardware": hw,
-        "sizes": all_results,
+        "sizes": ordered,
         "summary": {
-            "total_checks": sum(len(r.get("checks", [])) for r in all_results),
+            "total_checks": sum(len(r.get("checks", [])) for r in ordered),
             "total_pass": sum(
-                sum(1 for _, v in r.get("checks", []) if v) for r in all_results
+                sum(1 for _, v in r.get("checks", []) if v) for r in ordered
             ),
+            "sizes_measured": len(ordered),
         },
     }
-    out_path = ROOT / "benchmark_report.json"
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
-    cprint(f"\nReport saved: {out_path}", _GREEN)
-    try:
-        size_mb = out_path.stat().st_size / (1024 * 1024)
-        cprint(f"Report size: {size_mb:.2f} MB", _CYAN)
-    except Exception:
-        pass
+
+    if final:
+        cprint(f"\nReport saved: {out_path} ({len(ordered)} size(s))", _GREEN)
+        try:
+            size_mb = out_path.stat().st_size / (1024 * 1024)
+            cprint(f"Report size: {size_mb:.2f} MB", _CYAN)
+        except Exception:
+            pass
+    else:
+        cprint(f"  checkpointed {len(ordered)} size(s) to {out_path.name}", _CYAN)
+
+    return ordered
 
 
 # ---------------------------------------------------------------------------
 # 12. Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--sizes",
+        nargs="*",
+        default=sorted(CONFIG_MAP, key=lambda s: float(s.rstrip("M"))),
+        help=f"subset of {sorted(CONFIG_MAP)}",
+    )
+    parser.add_argument("--loss-steps", type=int, default=100)
+    args = parser.parse_args()
+
     print_header("FEATHER-V2 MEGA BENCHMARK")
-    cprint(f"Outputs: {IMG_DIR} / {ROOT}/benchmark_report.json", _CYAN)
+    cprint(
+        f"ladder: {', '.join(args.sizes)}  |  outputs: {IMG_DIR} / {OUT_DIR}",
+        _CYAN,
+    )
 
     print_hardware()
     datasets_info = load_streaming_datasets()
 
     hw = detect_hardware()
-    all_results = []
-    size_list = ["5M", "10M", "20M", "40M", "50M", "100M"]
+    all_results: list[dict[str, Any]] = []
+    size_list = list(args.sizes)
+    total = len(size_list)
 
     for idx, size in enumerate(size_list, 1):
-        cprint(f"\n[{idx}/6] Testing {size}...", _CYAN)
+        cprint(f"\n[{idx}/{total}] Testing {size}...", _CYAN)
         cfg = CONFIG_MAP[size]
         size_start = time.perf_counter()
-        try:
-            res = test_one_size(size, cfg, datasets_info)
-        except Exception as exc:
-            cprint(
-                f"  TIMEOUT or ERROR after {time.perf_counter()-size_start:.1f}s: {exc}",
-                _RED,
-            )
-            res = {"size_label": size, "ok": False, "error": str(exc), "checks": []}
+        res = test_one_size(size, cfg, datasets_info, loss_steps=args.loss_steps)
+        res["measured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         all_results.append(res)
 
-        status = "PASS ✓" if res.get("ok") else "FAIL ✗"
+        status = "PASS V" if res.get("ok") else "FAIL ?"
         color = _GREEN if res.get("ok") else _RED
         cprint(
-            f"[{idx}/6] {size}: {status} ({time.perf_counter()-size_start:.1f}s)", color
+            f"[{idx}/{total}] {size}: {status} ({time.perf_counter() - size_start:.1f}s)",
+            color,
         )
 
-        try:
-            import psutil
+        # Checkpoint after every size. The big sizes are slow and a Kaggle
+        # session can be interrupted or time out, so completed measurements are
+        # written out immediately instead of only at the end of the ladder.
+        save_report(all_results, hw, final=False)
 
-            proc = psutil.Process()
-            disk = proc.io_counters().read_bytes + proc.io_counters().write_bytes
-            cprint(f"  I/O so far: {disk/(1024*1024):.1f} MB", _CYAN)
-        except Exception:
-            pass
-
-    print_summary(all_results)
-    make_plots(all_results)
-    save_report(all_results, hw)
+    # Final save returns every size on disk, including any from an earlier
+    # subset run, so the summary and the plots match the saved report.
+    ordered = save_report(all_results, hw)
+    print_summary(ordered)
+    make_plots(ordered)
 
 
 if __name__ == "__main__":

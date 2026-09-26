@@ -59,20 +59,20 @@ class GenerativeEvolution(BaseComponent):
             use_fractional=True,
         )
 
-    def godel_self_rewriter(self, momr_old: float, momr_new: float) -> dict[str, Any]:
-        improved = momr_new > momr_old
+    def godel_self_rewriter(self, score_old: float, score_new: float) -> dict[str, Any]:
+        """Compare a proposed edit against the current score.
+
+        This reports only the comparison it can actually perform. It does not
+        verify that the edit is correct, terminating, or behaviour-preserving,
+        and it performs no rewriting: ``rewritten`` is always False because no
+        code is modified here.
+        """
         return {
             "proposed_edit": self.godel_edits[0] if self.godel_edits else "none",
-            "momr_old": momr_old,
-            "momr_new": momr_new,
-            "improved": improved,
-            "proof": improved,
+            "score_old": score_old,
+            "score_new": score_new,
+            "score_improved": score_new > score_old,
             "rewritten": False,
-            "never_degrades": True,
-            "godel_machine_theorem": True,
-            "immortal": True,
-            "functor_preserving": True,
-            "fractal_self_similar": True,
         }
 
     def interpretability_probe(self, x: np.ndarray) -> dict[str, Any]:

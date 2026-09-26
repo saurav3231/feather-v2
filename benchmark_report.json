@@ -1,0 +1,131 @@
+{
+  "timestamp": "2026-09-26T06:56:43Z",
+  "hardware": {
+    "features": {
+      "avx512": false,
+      "amx": false,
+      "avx2": false,
+      "avx": true,
+      "neon": false,
+      "machine": "amd64",
+      "cores_physical": 2,
+      "cores_logical": 4,
+      "cpu": "Intel(R) Core(TM) i5-3337U CPU @ 1.80GHz",
+      "arch_string_raw": "AMD64",
+      "kaggle": false,
+      "ram_gb": 2.9659500122070312
+    },
+    "kernel": {
+      "hypervector_dim": 1024,
+      "hv_memory_kb": 4,
+      "binding": "avx_wht",
+      "binds_per_instruction": 2,
+      "moe": "avx_tropical_tt",
+      "moe_tiles": "8x32",
+      "precision": "int8",
+      "threads": 2,
+      "cache": "L1",
+      "expected_tok_per_sec": "10-15 tok/s",
+      "adaptive_vocab": 256,
+      "adaptive_rank": 4,
+      "adaptive_binds": 2
+    }
+  },
+  "sizes": [
+    {
+      "size_label": "5M",
+      "checks": [
+        [
+          "weights_real",
+          true
+        ],
+        [
+          "ram_real",
+          true
+        ],
+        [
+          "timing_real",
+          true
+        ],
+        [
+          "loss_trend",
+          true
+        ],
+        [
+          "context_recall",
+          true
+        ],
+        [
+          "init_ok",
+          true
+        ]
+      ],
+      "init_ok": true,
+      "params": 5055020,
+      "ram_mb": 464.92578125,
+      "ram_delta_mb": 0.0,
+      "weight_mb": 19.283370971679688,
+      "corpus_available": true,
+      "tokenizer_tok_s": 290461.1081331487,
+      "tokenizer_info": {
+        "vocab_size": 8256,
+        "num_tokens": 25256,
+        "K_recent": 64,
+        "compression_ratio": 3.999881216344631
+      },
+      "forward_throughput": {
+        "32": 228.95099662820363,
+        "128": 535.4548500774521,
+        "512": 691.6337442716006
+      },
+      "bulk_tok_s": 687.0945443931236,
+      "gen_tok_s": 9.059037492556016,
+      "gen_tokens": 64,
+      "gen_elapsed_s": 7.0647681999980705,
+      "loss_corpus": "Wikipedia (en)",
+      "losses": [
+        9.049461364746094,
+        9.060799598693848,
+        9.114505767822266,
+        9.047205924987793,
+        8.973287582397461,
+        8.845696449279785,
+        8.686005592346191,
+        8.594889640808105,
+        8.428487777709961,
+        8.341390609741211,
+        8.163627624511719,
+        8.076467514038086,
+        7.935257434844971,
+        7.807753562927246,
+        7.668824195861816,
+        7.514772891998291,
+        7.445223808288574,
+        7.378018379211426,
+        7.242336750030518,
+        7.173295497894287
+      ],
+      "loss_trend_ok": true,
+      "context_sim": 0.9993280172348022,
+      "context_dim": 8256,
+      "energy_j": 776.1177397691714,
+      "energy_detail": {
+        "co2_kg": 2.1558826104699207e-07
+      },
+      "component_breakdown": {
+        "sensory": 14.850238214802427,
+        "liquid_memory": 7.8690750365035145,
+        "hyperdimensional": 27.100503128842963,
+        "knowledge_vault": 23.08824557601528,
+        "cognitive_weaver": 14.713514404904343,
+        "homeostasis": 3.8993255893066703,
+        "generative_evolution": 8.479098049624806
+      },
+      "ok": true
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "total_pass": 6
+  }
+}

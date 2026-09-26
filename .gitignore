@@ -2,14 +2,26 @@ __pycache__
 .venv
 models/*.gguf
 checkpoints/
+runs/
 dist/
 build/
 *.egg-info
 *.whl
 *.tar.gz
+*.pth
+*.pt
+*.bin
+*.safetensors
+train_report.json
 *.pdf
 *.png
 emissions.csv
 *.npz
 *.json
+
+# Measured evidence is version-controlled; only build output is ignored.
 !configs/*.json
+!benchmark_report.json
+!outputs/*.json
+!docs/images/*.png
+!docs/*.png

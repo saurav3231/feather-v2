@@ -1,110 +1,203 @@
-# Feather v2 — Architecture Final Blueprint v2.0
+# Feather v2 — Architecture
 
-## The People's LLM Engine — CPU-Native 200-Year Revolution
+**Version:** 2.0.0
+**Author:** Saurav Bhandari, Pokhara, Nepal
+**License:** MIT + No Big Tech Clause (see `LICENSE`)
 
-**Version:** 2.0.0 — 2026-09-25 — International English
-**Goal:** Maximum Output / Minimum Resource / Maximum Openness
-**Performance:** 60-70 tok/s CPU beats GPU 80 batch=1 close, 0.028J/1k 100x saving, 0.9GB RAM, 256x memory saving, 120x MOMR
-**Hardware:** Works for ALL PCs — i5-3337U 2C/4T 8GB 10-15 tok/s + Kaggle 2C/4T 31GB 35-50 tok/s + Agent 1C/2T 1.9GB 7-12 tok/s + i7-12700 12C 60-70 tok/s — Adaptive fallback AVX-512->AVX2->AVX->NEON->Scalar
-**Author:** Saurav Bhandari, Nepal Pokhara
-**License:** MIT + No Big Tech Clause — Open Source — Breaks monopoly — Physics free, data centers not
-
----
-
-### 1. Big Picture — Bicycle vs Truck
-
-**Problem:** Today's AI needs $25k graphics card, 700W power, 14GB special memory. Only big companies can afford.
-
-**Solution:** Feather v2 is bicycle vs truck:
-- **Truck (Transformer):** Needs big road, big fuel, only rich can use
-- **Bicycle (Feather v2):** Anyone can ride, low fuel, goes anywhere, you own it
+This document describes what the code actually does. Performance figures live in
+[`RESULTS_v2.0.md`](RESULTS_v2.0.md), which is generated from measurement artifacts. No
+speedup, energy-saving, or compression ratio is asserted here, because none of them has
+been measured against a baseline.
 
 ---
 
-### 2. Design Principles — MOMR Metric
+## 1. Model structure
 
-**MOMR = (Intelligence * Reliability * Context Length) / (Joules * Bytes * Dollars)**
+`FeatherV2Model` is a standard decoder-style language model with a non-standard block.
 
-1. **Memory not Attention** — compress like hologram via fractional power-law + hyperdimensional WHT — 256x mem saving
-2. **Add don't Multiply** — Tropical min-plus 0 mults 123x energy saving
-3. **Loop don't Stack** — 1 block looped adaptive 2-8x with liquid adapters — 80% param saving
-4. **Skip if Easy** — Entropy gate adaptive 62%-70% early 40%-50% speedup
-5. **Compute with Physics not Against It** — thermodynamic relaxation near kT ln2=2.8e-21J per bit — 195 TOPS/W
+```
+input_ids
+  -> embed            nn.Embedding(vocab, dim)
+  -> pos_embed        nn.Embedding(seq_len, dim)
+  -> blocks           n_blocks x CognitiveBlock
+  -> norm_f           nn.LayerNorm(dim)
+  -> head             nn.Linear(dim, vocab, bias=False)
+  -> logits
+```
 
----
+`CognitiveBlock` runs all seven components in sequence, each preceded by its own
+`LayerNorm`:
 
-### 3. 7 Components
+| Order | Component | Class | Source docstring |
+| --- | --- | --- | --- |
+| 1 | Sensory encoder | `SensoryEncoder` | Multi-scale fractional encoder with p-adic scale selection. |
+| 2 | Liquid memory | `LiquidMemory` | Hierarchical chunked gated recurrence. |
+| 3 | Holographic memory | `HyperDimensionalMemory` | Holographic mixing through a Walsh-Hadamard basis. |
+| 4 | Knowledge vault | `KnowledgeVault` | Sparse mixture of TT-compressed experts with Sinkhorn-balanced routing. |
+| 5 | Cognitive weaver | `CognitiveWeaver` | Kolmogorov-Arnold feed-forward with a differentiable Godel loop. |
+| 6 | Homeostasis governor | `HomeostasisGovernor` | Predictive entropy gate that rescales the residual stream. |
+| 7 | Generative evolution | `GenerativeEvolution` | Jacobi-spectral refinement with a learned mutation step. |
 
-| Component | Purpose | Math | Size | Cache |
-|-----------|---------|------|------|-------|
-| **1. Sensory Encoder** | Convert world to meaning | Adaptive Multi-Scale Fractional p-adic Rough Path | 40KB L2 52B L1 | L2 |
-| **2. Liquid Memory** | Short-term thinking | Adaptive Hierarchical Liquid Fractional Memory | 9KB L1 | L1 |
-| **3. HyperDimensional Memory** | 10k-D brain holographic | Hybrid WHT HRR TT Clifford | 32KB L2 | L2 |
-| **4. Knowledge Vault** | Long-term knowledge | Adaptive Softmin Tropical-TT Fusion SparX AMX | 2.4MB L3 | L3 |
-| **5. Cognitive Weaver** | Deep thinking | Adaptive MoD Gödel + KAN | 16KB L1 reused | L1 |
-| **6. Homeostasis Governor** | Energy manager | Adaptive Predictive Active Inference | Minimal | Minimal |
-| **7. Generative Evolution** | Writer | Adaptive Tree p-adic Entropy Jacobi | L1 | L1 |
+The same seven components also appear once at the top level of the model, before the
+`blocks` stack.
 
----
+The per-component `LayerNorm` is load-bearing. Before it was added, the residual stream
+grew without bound across the Godel loop and overflowed in float32 after a few dozen
+training steps. There is a regression test for this.
 
-### 4. 13 Advanced Maths
+### Tied embeddings
 
-| Math | Saving | CPU Win |
-|------|--------|---------|
-| 1. Hybrid Adaptive Tokenizer | 4.5x fewer tokens | CPU branch predictor 95% |
-| 2. Hybrid WHT | 0 mults 10x energy | AVX2 4 binds per 256-bit |
-| 3. Adaptive Fractional | 3x better retention | Sequential complex task |
-| 4. Adaptive Tropical | 0 mults 123x energy | vpminsd+vpaddd 0.3ns |
-| 5. Adaptive p-adic | 63.9x fewer ops 512x mem | Pointer chasing L3 |
-| 6. Adaptive TT | 8x->256x compression | Tiny cores L1 AMX |
-| 7. Adaptive Rough Path | 2520x->15123x compression | Sequential iterated integrals |
-| 8. Adaptive Sinkhorn | 5x balanced -30% latency | Small matvec L2 |
-| 9. Adaptive Clifford | 4x->8x reduction | 1 register 8 concepts |
-| 10. Adaptive Sheaf | Smooth no spikes | Consistency branching |
-| 11. Adaptive Equilibrium | 90%->80% mem saving | Thermodynamic relaxation |
-| 12. Adaptive Jacobi | 66%->80% latency cut | 8 threads 1 per physical core |
-| 13. KAN | 2x fewer params than MLP | Learnable spline edges |
+With `tie_embeddings: true` (the default), `head` shares its weight with `embed`, so
+`head` contributes zero parameters. This is why the parameter breakdown reports
+`head: 0`.
 
 ---
 
-### 5. Data Flow
+## 2. Operator library
 
-Input 512x512 -> SensoryEncoder 100k tok/s 15123x compression 95% info -> LiquidMemory 150k tok/s 1e21x retention 99% sparsity -> HyperDimensionalMemory 50k tok/s 10k-D holographic 0 mults + expressive + 8x->256x compression + 4x reduction -> KnowledgeVault 15k tok/s 9.7x faster bottleneck fixed -> CognitiveWeaver 800k tok/s 80% save + 50% speedup + stable + immortal + 2x fewer params -> HomeostasisGovernor 3k tok/s 80-90% saving near kT ln2 + predictive + active inference -> GenerativeEvolution 600k tok/s 80% latency cut -> Output 8 tokens
+`src/feather_v2/nn_math.py` exports 23 names. The operators that carry the architecture:
+
+| Operator | Purpose | Exact or relaxed |
+| --- | --- | --- |
+| `fwht` / `ifwht` | Fast Walsh-Hadamard transform and inverse | Exact |
+| `pad_to_pow2` / `next_pow2` | Shape helpers for the transform | Exact |
+| `divisibility_profile` | p-adic divisibility descriptor | Exact integer, **detached** |
+| `p_adic_weights` | p-adic weighted combination | Exact integer, **detached** |
+| `p_adic_distance` | Ultrametric-style distance on p-adic digits | Exact integer, **detached** |
+| `tropical_matmul` / `tropical_softmax` | Min-plus matmul | Softmin relaxation |
+| `softmin` | Temperature-controlled min | Relaxation |
+| `fractional_weights` | Hierarchical short/long-range weighting | Smooth relaxation |
+| `tt_factors` / `tt_compress` / `tt_matmul` | Tensor-train construction and matmul | Low-rank approximation |
+| `sinkhorn` | Entropic optimal transport projection | Iterative relaxation |
+| `sheaf_project` | Sheaf consistency projection | Projection, differentiable |
+| `clifford_gate` | Clifford-algebra style gate | Low-rank approximation |
+| `equilibrium_update` | Fixed-point relaxation | Iterative |
+| `jacobi_decode` | Jacobi-style iterative decode | Iterative |
+| `rough_path_signature` | Rough-path style signature features | Relaxation |
+| `godel_encode` / `godel_log_code` | Godel-style log coding | `log`-based, finite on large inputs |
+| `alpha_dropout` | Dropout variant | Stochastic |
+| `KANLinear` | Kolmogorov-Arnold spline layer | Learnable, differentiable |
+
+### Honest limitations
+
+Three of these deserve explicit statement, because the names suggest more than is
+delivered:
+
+1. **The p-adic operators are not trainable.** `divisibility_profile` produces an integer
+   0/1 mask, so it is detached from the autograd graph. It influences routing decisions
+   but receives no gradient. This is inherent: a discrete divisibility test has no useful
+   derivative.
+
+2. **"Tropical" is a softmin, not a true min-plus product.** `tropical_matmul` is
+   differentiable by construction, which means it approximates rather than computes the
+   exact min-plus result. It is a relaxation, and its output is not a tropical semiring
+   element.
+
+3. **"Godel coding" is log-based.** The first implementation used an absolute-value form
+   that produced zero gradients and non-finite values for large messages. The current
+   `godel_log_code` formulation is finite and differentiable, but it is a monotone
+   encoding, not a true Godel numbering.
+
+The TT, Clifford, rough-path, Sinkhorn, sheaf, equilibrium, and Jacobi operators are
+smooth numerical relaxations. They are useful as inductive biases, but none of them
+implements the exact discrete algorithm it is named after.
 
 ---
 
-### 6. Hardware Adaptive
+## 3. Mixture of experts
 
-| PC | Cores | SIMD | Hypervector | Binding | Threads | tok/s |
-|----|-------|------|-------------|---------|---------|-------|
-| i5-3337U | 2C/4T | AVX | 1024-D 4KB | avx_wht 2 binds | 2 | 10-15 |
-| Kaggle Xeon | 2C/4T | AVX2 | 4096-D 16KB | avx2_wht 4 binds | 2 | 35-50 |
-| Agent Env Xeon | 1C/2T | AVX512 VNNI | 1024-D 4KB | avx512_wht 8 binds | 1 | 7-12 |
-| i7-12700 | 12C | AVX512+AMX | 10000-D 40KB | avx512_wht 8 binds + AMX | 12 | 60-70 |
-| M3 | 8C | NEON | 1024-D 4KB | neon_wht 4 binds | 8 | 35-50 |
-| Pi 5 | 4C | NEON | 1024-D 4KB | neon_wht 4 binds | 4 | 6 |
-| Old 2010 | 1C | Scalar | 512-D 2KB | scalar_wht 1 bind | 1 | 3-5 |
+`KnowledgeVault` routes each token to `moe_top_k` of `moe_experts` `TTExpert` modules.
+Routing is computed from the hidden state and combined with the top-k auxiliary
+load-balancing penalty in `FeatherV2Model.loss`.
+
+`moe_top_k` is `2`, and it is now set explicitly in all five ladder configs
+(`configs/feather_*.json`) rather than being inherited from `DEFAULT_CONFIG`.
+
+**Decision record.** Earlier revisions of this project referred to both `1` and `6` as
+the intended value. The requirement was ambiguous, so `2` was kept and written down
+explicitly rather than left to a default. The rationale is a judgement, not a measured
+result: routing width trades capacity against per-token work, so `1` is the sparse end
+and `6` the dense end. **No ablation over `moe_top_k` was run, so this document does
+not claim `2` is optimal.** It is the value the code and the measured ladder use.
+
+Routing width is genuinely config-driven: `FeatherV2Model` passes
+`config["moe_top_k"]` into `KnowledgeVault`, which stores it as `self.top_k`. There is
+no hardcoded `1` or `6` in the routing path. If a different width is wanted, change it
+in the configs and re-run `scripts/measure_sizes.py` and the benchmark, because expert
+count and routing width both change parameter count. Adaptive per-token routing width
+is unimplemented and untested.
 
 ---
 
-### 7. Verification
+## 4. Tokenisation
 
-- 13 maths 13/13 PASS
-- 7 components 7/7 PASS
-- Small 64x64 cos 1.0 matches attention — Agent Env 1C/2T 1.9GB 8-15 tok/s
-- Medium 512x384 cos 1.0 512x mem saving 2KB vs 1024KB 64x fewer ops + tropical 0 mults — Kaggle 2C/4T 31GB 35-50 tok/s
-- WikiText medium 2000 lines 911144 tokens real 1779 chunks 512x384 — loss 18->0.50 smooth no spikes — bulk 1400 tok/s — Xeon @2.20GHz 2C/4T AVX2 31GB RAM 35-50 tok/s
-- Context recall sim 0.96 3 hops to 1M
-- MOMR ~120x vs Transformer 1x
+`hybrid_adaptive_tokenizer` produces a fixed vocabulary of `8256` tokens: `256` adaptive
+slots plus a byte-pair-merge vocabulary. Sequence length defaults to `512` and is bounded
+by the learned `pos_embed` table.
 
 ---
 
-## License
+## 5. Hardware adaptation
 
-MIT + No Big Tech Clause — Open Source — Breaks monopoly — Physics free, data centers not
+`feather_v2.hardware` detects CPU features and selects a Walsh-Hadamard binding, falling
+back without raising:
 
-## 200-Year Vision
+```
+AVX-512 -> AVX2 -> AVX -> NEON -> scalar
+```
 
-Substrate-agnostic: digital CPU 2026 -> memristor 2030 -> photonic 2032 -> quantum HDC 2040 -> biological 2100 -> unknown 2226. Gödel self-rewriter immortal.
+Run `python -m feather_v2.hardware` to see the detected features and the selected
+binding on the current machine.
 
-**CPU is the people. GPU is the monopoly. Feather v2 is CPU's revenge.**
+The binding selection is real and tested. The per-CPU throughput numbers that previously
+appeared in this document were not measured and have been removed; see
+[`RESULTS_v2.0.md`](RESULTS_v2.0.md) for the single machine that was actually measured.
+
+---
+
+## 6. Configuration
+
+Defaults live in `DEFAULT_CONFIG`; the size ladder lives in `configs/`. Loading is strict
+by default: an unknown key raises instead of being silently ignored, and renamed keys are
+migrated with a warning.
+
+| Key | Default | Meaning |
+| --- | ---: | --- |
+| `vocab` | 8256 | Token vocabulary size |
+| `dim` | 512 | Model width |
+| `n_blocks` | 2 | Number of `CognitiveBlock` stacks |
+| `seq_len` | 512 | Maximum sequence length |
+| `hv_dim` | 8192 | Hypervector dimensionality |
+| `n_scales` | 4 | Sensory multi-scale count |
+| `chunk` | 32 | Liquid memory chunk size |
+| `p_adic_p` / `p_adic_levels` | 2 / 8 | p-adic descriptor base and levels |
+| `tt_rank` | 6 | Tensor-train rank |
+| `moe_experts` / `moe_top_k` | 96 / 2 | Expert count and routing width |
+| `weaver_loops` / `weaver_gaussians` | 2 / 5 | Godel loop iterations and Gaussian basis |
+| `evo_iters` / `evo_latent` | 6 / 16 | Refinement iterations and latent size |
+| `tau` | 0.1 | Softmin temperature |
+| `dropout` / `dropout_q` | 0.25 / 0.5 | Dropout rates |
+| `alpha_fractional` | 0.7 | Fractional weighting exponent |
+| `sig_dim` | 8 | Signature feature width |
+| `tie_embeddings` | true | Share `head` weight with `embed` |
+
+The ladder configs vary `dim`, `hv_dim`, `moe_experts`, `n_blocks`, and `tt_rank`. Each
+config's filename reflects its **measured** parameter count, not a target — see
+`configs/size_report.json`.
+
+---
+
+## 7. What is verified
+
+- The test suite covers the operator library, component gradients, the detached p-adic
+  descriptor, Godel-coder numerical stability, the per-component LayerNorm, real model
+  training, checkpoint round trips, and config validation.
+- `tests/test_gguf.py` fails if a `.gguf` file exists in the tree without a real exporter
+  being registered, which prevents mislabelled artifacts from reappearing.
+- Parameter counts, byte sizes, and CPU runtime figures in `RESULTS_v2.0.md` are read
+  directly from JSON artifacts produced by `scripts/measure_sizes.py` and
+  `kaggle/test_all_sizes_mega.py`.
+
+Not verified, and therefore not claimed anywhere: benchmark accuracy (MMLU or
+otherwise), comparison against any GPU or other project, quantised export, and
+long-context behaviour beyond the measured sequence lengths.

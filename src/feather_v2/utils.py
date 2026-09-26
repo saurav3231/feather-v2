@@ -426,18 +426,6 @@ def adaptive_sinkhorn(
     return plan
 
 
-def _p_adic_group(x: np.ndarray, p: int = 2) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float64)
-    n = x.shape[0]
-    group = max(1, int(np.log2(max(n, 2))) // p)
-    if group <= 1:
-        return x
-    grouped = np.array([np.mean(x[i : i + group]) for i in range(0, n, group)])
-    return np.interp(
-        np.linspace(0, n - 1, n), np.arange(0, n, group)[: grouped.size], grouped
-    )
-
-
 # ---------------------------------------------------------------------------
 # 9. Adaptive Clifford
 # ---------------------------------------------------------------------------
@@ -630,6 +618,68 @@ def kan_activation(
 
 
 # ---------------------------------------------------------------------------
+# Public surface named in the v2 API but previously missing
+# ---------------------------------------------------------------------------
+def normalize_L2(x: np.ndarray, axis: int = -1, eps: float = 1e-12) -> np.ndarray:
+    """L2-normalise along ``axis``, leaving zero vectors untouched."""
+    x = np.asarray(x, dtype=np.float64)
+    norm = np.linalg.norm(x, axis=axis, keepdims=True)
+    return x / np.maximum(norm, eps)
+
+
+def build_param_from_p(
+    p: int,
+    dim: int,
+    levels: int = 8,
+    dtype: np.dtype = np.float64,
+) -> np.ndarray:
+    """Build a p-adic divisibility descriptor over ``p**0 .. p**(levels-1)``.
+
+    Row ``i`` marks, for each of ``dim`` coordinates with value ``i``, which
+    powers of ``p`` divide it. This is the exact discrete descriptor, so it is
+    integer-valued rather than a relaxation.
+    """
+    if p < 2:
+        raise ValueError(f"p must be a prime >= 2, got {p}")
+    if levels < 1:
+        raise ValueError(f"levels must be >= 1, got {levels}")
+    values = np.arange(dim, dtype=np.int64).reshape(-1, 1)
+    powers = (np.asarray(p, dtype=np.int64) ** np.arange(levels)).reshape(1, -1)
+    return (values % powers == 0).astype(dtype)
+
+
+def create_param_from_p(
+    p: int, dim: int, levels: int = 8, dtype: np.dtype = np.float64
+) -> np.ndarray:
+    """Alias of :func:`build_param_from_p` kept for the documented v2 name."""
+    return build_param_from_p(p, dim, levels=levels, dtype=dtype)
+
+
+def tt_compress(
+    W: np.ndarray,
+    rank: int = 6,
+    rank_adaptive: bool = True,
+    use_sparx: bool = True,
+    use_amx: bool = True,
+    use_tropical: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Public TT compression returning ``(g1, g2)`` for a 2-D factor matrix."""
+    return adaptive_tt_compress(
+        W,
+        rank=rank,
+        rank_adaptive=rank_adaptive,
+        use_sparx=use_sparx,
+        use_amx=use_amx,
+        use_tropical=use_tropical,
+    )
+
+
+def tt_clifford_reduce(x: np.ndarray, rank: int = 6) -> np.ndarray:
+    """Public Clifford-style low-rank reduction of a vector."""
+    return _tt_clifford_reduce(x, rank=rank)
+
+
+# ---------------------------------------------------------------------------
 # Helpers re-exported for backwards compatibility with v1 imports
 # ---------------------------------------------------------------------------
 __all__ = [
@@ -656,4 +706,9 @@ __all__ = [
     "adaptive_equilibrium_update",
     "adaptive_jacobi_decode",
     "kan_activation",
+    "normalize_L2",
+    "build_param_from_p",
+    "create_param_from_p",
+    "tt_compress",
+    "tt_clifford_reduce",
 ]

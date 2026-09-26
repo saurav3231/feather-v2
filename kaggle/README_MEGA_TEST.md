@@ -1,151 +1,261 @@
-# Feather-v2 Mega Test — Kaggle CPU $0
+# Feather v2 — size ladder benchmark on Kaggle CPU
 
-Test all 6 Feather-v2 sizes (5M, 10M, 20M, 40M, 50M, 100M) on Kaggle CPU.
-Honest metrics, beautiful tables, 6 PNGs, benchmark_report.json.
-No GPU needed. 12h session. 272 checks 100% PASS.
+Runs the real model across the size ladder and records what it measures.
 
-## Quick Start
+The benchmark performs actual forward passes, real backprop, and real autoregressive
+generation. It does not estimate throughput, derive RAM from parameter counts, or
+substitute a placeholder corpus when a dataset is unavailable.
 
-1. Go to https://www.kaggle.com/code
-2. Click **New Notebook**
-3. Select **CPU** (not GPU)
-4. Set session to **12h**
-5. Internet: **OFF** after installing dependencies
+---
 
-## Cell 1: Install Dependencies
+## Quick start
+
+1. Open <https://www.kaggle.com/code> and create a notebook.
+2. Select the **CPU** accelerator, not GPU.
+3. Internet on for the install cell.
+4. **Upload this repository as a Kaggle dataset** (or otherwise place the project files
+   in the notebook's working directory), then run the cells below.
+
+Uploading the tree you want to measure is the recommended route. Cloning a public remote
+is deliberately not automated, because it would quietly benchmark whatever is on that
+remote's default branch instead of the code you are trying to test. If you do want a
+clone, set `FEATHER_REPO` to an explicit URL and pin the branch or commit.
+
+---
+
+## Cell 1 — install
 
 ```python
-!pip install -q psutil codecarbon rich matplotlib tabulate colorama tokenizers datasets numpy
+!pip install -q torch psutil codecarbon rich matplotlib tabulate colorama tokenizers datasets numpy
 !pip install -e . -q
 ```
 
-## Cell 2: Upload Feather-v2
+`torch` is a real dependency of this package and is declared in `pyproject.toml`.
 
-Upload `feather-v2-offline-v1.0.0.tar.gz` (30KB) to Kaggle dataset or extract inline:
+---
+
+## Cell 2 — locate the repository
+
+Adjust the path to wherever the repository was uploaded or extracted.
 
 ```python
-!tar -xzf feather-v2-offline-v1.0.0.tar.gz
+import sys, pathlib
+REPO = pathlib.Path("/kaggle/working/feather-v2")
+sys.path.insert(0, str(REPO))
+print(REPO.exists(), sorted(p.name for p in REPO.iterdir())[:10])
 ```
 
-## Cell 3: Hardware Detection
+---
+
+## Cell 3 — hardware detection
 
 ```python
-from feather_v2.hardware import detect_cpu_features, get_best_kernel, summary
+from feather_v2.hardware import detect_cpu_features, summary
 
-cpu_info = detect_cpu_features()
-print(f"CPU: {cpu_info['processor']}")
-print(f"Cores: {cpu_info['physical_cores']} | RAM: {cpu_info['ram_total_gb']}GB")
-print(f"AVX: {cpu_info['avx_level']} | Threads: {cpu_info['threads']}")
+print(summary())
+feats = detect_cpu_features()
+print(feats)
 ```
 
-## Cell 4: Run Mega Test
+`summary()` reports the detected features and the selected kernel binding. It does not
+predict throughput; there is no per-tier tok/s estimate in this project.
+
+---
+
+## Cell 4 — run the benchmark
 
 ```python
-import sys
-sys.path.append('/kaggle/working')
-
 from kaggle.test_all_sizes_mega import main
 
-results = main()
+main()
 ```
 
-## Cell 5: Display Summary
+Or from a shell:
+
+```bash
+python kaggle/test_all_sizes_mega.py --loss-steps 60
+python kaggle/test_all_sizes_mega.py --sizes 5M --loss-steps 20   # quick check
+```
+
+`main()` writes `benchmark_report.json` and the plots. It returns `None`; read the JSON for
+results.
+
+---
+
+## Cell 5 — read the results
+
+The report's `sizes` field is a **list** of per-size records.
 
 ```python
+import json
 from rich.console import Console
 from rich.table import Table
 
+report = json.load(open("benchmark_report.json"))
 console = Console()
-table = Table(title="Feather-v2 All Sizes — Summary")
 
-table.add_column("Size", style="cyan")
-table.add_column("Params", style="magenta")
-table.add_column("RAM", style="green")
-table.add_column("Forward 512", style="yellow")
-table.add_column("Gen", style="blue")
-table.add_column("Bulk", style="magenta")
-table.add_column("Loss", style="red")
-table.add_column("Sim", style="green")
-table.add_column("Energy", style="yellow")
-table.add_column("Status", style="bold green")
+table = Table(title="Feather v2 — measured, by size")
+for col in ("Size", "Params", "RAM MB", "Fwd@512", "Bulk t/s", "Gen t/s", "Loss", "Energy J", "Checks"):
+    table.add_column(col)
 
-for size, data in results.get('sizes', {}).items():
-    status = "✓ PASS" if data.get('status') == 'PASS' else "✗ FAIL"
+for r in report["sizes"]:
+    ft = r.get("forward_throughput") or {}
+    losses = r.get("losses") or []
+    checks = r.get("checks") or []
     table.add_row(
-        size,
-        f"{data.get('params', 0):,}",
-        f"{data.get('ram_mb', 0)/1024:.2f}GB",
-        f"{data.get('forward_512', 0):,} tok/s",
-        f"{data.get('gen', 0)} tok/s",
-        f"{data.get('bulk', 0):,}",
-        f"{data.get('loss_end', 0):.2f}",
-        f"{data.get('sim', 0):.2f}",
-        f"{data.get('energy_j_per_1k', 0):.3f}J",
-        status,
+        r.get("size_label", "?"),
+        f"{r.get('params', 0):,}",
+        f"{r.get('ram_mb', 0):.1f}",
+        f"{ft.get('512', 0):.1f}",
+        f"{r.get('bulk_tok_s', 0):.1f}",
+        f"{r.get('gen_tok_s', 0):.2f}",
+        f"{losses[0]:.3f} -> {losses[-1]:.3f}" if losses else "not measured",
+        f"{r.get('energy_j', 0):.4g}",
+        f"{sum(1 for _, v in checks if v)}/{len(checks)}",
     )
 
 console.print(table)
-print("Scaling linear ✓ | Bottleneck fixed 9.7x ✓ | 272 checks 100% PASS ✓")
+print(report["summary"])
 ```
 
-## Cell 6: View PNGs
+Check names are `weights_real`, `ram_real`, `timing_real`, `loss_trend`, `state_stability`,
+and `init_ok`. Each entry in `checks` is a `(name, passed)` pair, and the value that
+justified it is stored alongside in the same record.
+
+---
+
+## Cell 6 — view the plots
 
 ```python
 from IPython.display import Image, display
-import os
+import pathlib
 
-image_dir = 'feather-v2/docs/images'
-if os.path.exists(image_dir):
-    for fname in sorted(os.listdir(image_dir)):
-        if fname.endswith('.png'):
-            print(f'\n## {fname}')
-            display(Image(filename=os.path.join(image_dir, fname)))
+for png in sorted((REPO / "docs" / "images").glob("*.png")):
+    print(f"\n## {png.name}")
+    display(Image(filename=str(png)))
 ```
+
+---
+
+## Cell 7 — regenerate the results document
+
+```python
+!python {REPO}/scripts/make_report.py
+```
+
+Writes `docs/RESULTS_v2.0.md` from the JSON artifacts, so the documented numbers cannot
+drift from the measurements.
+
+---
+
+## Running one size at a time
+
+```python
+from kaggle.test_all_sizes_mega import test_one_size, CONFIG_MAP, load_streaming_datasets
+
+datasets_info = load_streaming_datasets()
+result = test_one_size("5M", CONFIG_MAP["5M"], datasets_info, loss_steps=20)
+print(result["checks"])
+```
+
+`CONFIG_MAP` is loaded from `configs/`, so the ladder in the benchmark and the ladder in
+the repository cannot diverge. Available labels are `sorted(CONFIG_MAP)`.
+
+---
 
 ## Outputs
 
-- `feather-v2/docs/images/loss_all_sizes.png`
-- `feather-v2/docs/images/toks_vs_seqlen.png`
-- `feather-v2/docs/images/memory_vs_params.png`
-- `feather-v2/docs/images/scaling.png`
-- `feather-v2/docs/images/energy_vs_size.png`
-- `feather-v2/docs/images/component_breakdown_40M.png`
-- `feather-v2/benchmark_report.json`
+- `benchmark_report.json` — every measurement and check, per size
+- `docs/images/scaling.png` — parameters against RAM
+- `docs/images/memory_vs_params.png`
+- `docs/images/loss_all_sizes.png`
+- `docs/images/toks_vs_seqlen.png`
+- `docs/images/energy_vs_size.png`
 
-## Time Estimate
+---
 
-- Each size: ~5 minutes
-- Total 6 sizes: ~30 minutes
-- Fits easily in 12h CPU session
+## Ladder
 
-## Quota Safety
+Five configurations, each named for its measured parameter count:
 
-- Working dir: <5GB
-- Dataset cache: <1GB
-- Checkpoints: last 2 only
-- Total: well under 20GB Kaggle quota
+| Label | Parameters | Config |
+| --- | ---: | --- |
+| 5M | 5,055,020 | `configs/feather_5M.json` |
+| 10M | 9,604,412 | `configs/feather_10M.json` |
+| 20M | 19,520,508 | `configs/feather_20M.json` |
+| 40M | 40,337,084 | `configs/feather_40M.json` |
+| 60M | 58,368,714 | `configs/feather_60M.json` |
+
+There are no 50M or 100M configurations. Those labels were removed because no config
+produced those counts.
+
+---
+
+## Runtime expectations
+
+Measured on a 2-core i5-3337U, the smallest config took roughly 10 minutes for 60 loss
+steps. The larger configs are substantially slower, because the measurement is real
+backprop on a CPU rather than a cached or synthesised number. On a faster machine expect
+less; there is no fixed per-size estimate in this repository because none has been
+measured across machines.
+
+If a session runs short, run one size at a time with `--sizes`.
+
+### Interruption and subset runs
+
+`benchmark_report.json` is written **after every size**, not only when the whole ladder
+finishes, so a session that is interrupted or times out keeps the sizes it already
+measured.
+
+Re-running merges by size rather than replacing the file, so a subset run such as
+`--sizes 60M` updates only the 60M entry and leaves the others intact. Re-measuring a
+size overwrites that entry in place instead of appending a duplicate. Each entry records
+its own `measured_at` timestamp, so a report assembled from more than one session is
+honest about that.
+
+Practical recovery pattern after an interruption:
+
+```bash
+python kaggle/test_all_sizes_mega.py --sizes 5M 10M 20M 40M 60M --loss-steps 60
+# interrupted during 60M? nothing is lost, and this replaces just that entry:
+python kaggle/test_all_sizes_mega.py --sizes 60M --loss-steps 60
+```
+
+---
+
+## Corpus availability
+
+The benchmark attempts three corpora:
+
+| Role | Identifier |
+| --- | --- |
+| Tokenisation | `Skylion007/openwebtext` |
+| Training loss | `wikimedia/wikipedia`, config `20231101.en` |
+| Generation text | `HuggingFaceH4/no_robots` |
+
+If one is unavailable it is recorded as unavailable and the dependent measurement is
+marked as such. No placeholder text is substituted.
+
+---
 
 ## Troubleshooting
 
-**ImportError: No module named 'feather_v2'**
-```python
-import sys
-sys.path.append('/kaggle/working')
-```
+**`ModuleNotFoundError: No module named 'feather_v2'`**
 
-**Memory error on 100M**
-Skip 100M or reduce batch size. 40M is the main beast.
+The repository root must be on `sys.path`; see Cell 2.
 
-**Timeout**
-Run sizes one at a time:
-```python
-from kaggle.test_all_sizes_mega import test_one_size, CONFIG_MAP
+**Out of memory on the largest config**
 
-for size in ['5M', '10M', '20M', '40M']:
-    result = test_one_size(size, CONFIG_MAP[size])
-    print(f"{size}: {result['status']}")
-```
+Run fewer sizes at once. The 58M configuration needs roughly 1.3 GB of weights plus the
+PyTorch runtime.
+
+**A check fails**
+
+Read the value stored next to the check in `benchmark_report.json`. Every check records
+its measurement, so a failure can be diagnosed rather than guessed at.
+
+---
 
 ## Author
 
-Saurav Bhandari — Pokhara, Nepal
+Saurav Bhandari, Pokhara, Nepal

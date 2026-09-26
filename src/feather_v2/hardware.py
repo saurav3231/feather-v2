@@ -239,10 +239,9 @@ def get_best_kernel(features: dict[str, Any] | None = None) -> dict[str, Any]:
             "binds_per_instruction": 8,
             "moe": "amx_tropical_tt",
             "moe_tiles": "16x64",
-            "precision": "bf16",
+            "compute_dtype": "float32",
             "threads": physical,
             "cache": "L2",
-            "expected_tok_per_sec": "94 tok/s",
             "adaptive_vocab": 8256,
             "adaptive_rank": 8,
             "adaptive_binds": 8,
@@ -255,10 +254,9 @@ def get_best_kernel(features: dict[str, Any] | None = None) -> dict[str, Any]:
             "binds_per_instruction": 4,
             "moe": "avx2_tropical_tt",
             "moe_tiles": "16x64",
-            "precision": "int8",
+            "compute_dtype": "float32",
             "threads": physical,
             "cache": "L2",
-            "expected_tok_per_sec": "35-50 tok/s",
             "adaptive_vocab": 4096 if ram < 16.0 else 8256,
             "adaptive_rank": 6,
             "adaptive_binds": 4,
@@ -271,10 +269,9 @@ def get_best_kernel(features: dict[str, Any] | None = None) -> dict[str, Any]:
             "binds_per_instruction": 2,
             "moe": "avx_tropical_tt",
             "moe_tiles": "8x32",
-            "precision": "int8",
+            "compute_dtype": "float32",
             "threads": min(2, physical),
             "cache": "L1",
-            "expected_tok_per_sec": "10-15 tok/s",
             "adaptive_vocab": 4096 if ram >= 8.0 else 256,
             "adaptive_rank": 4,
             "adaptive_binds": 2,
@@ -287,10 +284,9 @@ def get_best_kernel(features: dict[str, Any] | None = None) -> dict[str, Any]:
             "binds_per_instruction": 4,
             "moe": "neon_tropical",
             "moe_tiles": "4x16",
-            "precision": "int8",
+            "compute_dtype": "float32",
             "threads": physical,
             "cache": "L1",
-            "expected_tok_per_sec": "35-50 tok/s (M3), 6 tok/s (Pi 5)",
             "adaptive_vocab": 4096,
             "adaptive_rank": 4,
             "adaptive_binds": 4,
@@ -302,10 +298,9 @@ def get_best_kernel(features: dict[str, Any] | None = None) -> dict[str, Any]:
         "binds_per_instruction": 1,
         "moe": "scalar_tropical",
         "moe_tiles": "1x1",
-        "precision": "int8",
+        "compute_dtype": "float32",
         "threads": 1,
         "cache": "L1",
-        "expected_tok_per_sec": "3-5 tok/s",
         "adaptive_vocab": 256,
         "adaptive_rank": 2,
         "adaptive_binds": 1,
@@ -321,7 +316,7 @@ def load_config(path: str) -> dict:
     fv.setdefault("binding", kernel["binding"])
     fv.setdefault("moe", kernel["moe"])
     fv.setdefault("threads", kernel["threads"])
-    fv.setdefault("precision", kernel["precision"])
+    fv.setdefault("compute_dtype", kernel["compute_dtype"])
     fv.setdefault("vocab", kernel.get("adaptive_vocab", 8256))
     fv.setdefault("tt_rank", kernel.get("adaptive_rank", 6))
     fv["hardware_detected"] = detect_cpu_features()
@@ -352,8 +347,8 @@ def summary() -> str:
         "Best kernel: "
         + f"{kernel['binding'].upper()} binding, "
         + f"{kernel['hypervector_dim']}-D hypervector ({kernel['hv_memory_kb']}KB {kernel['cache']}), "
-        + f"{kernel['moe']}, {kernel['threads']} threads, {kernel['precision']}",
-        f"Expected: {kernel['expected_tok_per_sec']}",
+        + f"{kernel['moe']}, {kernel['threads']} threads, {kernel['compute_dtype']}",
+        "Throughput: not predicted. Measure with kaggle/test_all_sizes_mega.py.",
         f"Adaptive vocab: {kernel.get('adaptive_vocab', 8256)}",
         f"Adaptive TT rank: {kernel.get('adaptive_rank', 6)}",
     ]
