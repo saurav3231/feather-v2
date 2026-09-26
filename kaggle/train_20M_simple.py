@@ -230,6 +230,14 @@ def load_local_text() -> Iterator[tuple[str, str]]:
             )
 
 
+# Measured on wikimedia/wikipedia 20231101.en with FittedRunTokenizer(run=4):
+# 4,207,607 characters encode to 1,803,817 ids, i.e. 0.4287 tokens per character.
+# The old code counted characters against target_tokens and then reported that
+# character count as "tokens", so every log overstated the corpus by 2.3x and the
+# loop either over-read or came up short.
+_CHARS_PER_TOKEN = 2.34
+
+
 def build_token_stream(
     target_tokens: int,
     vocab_size: int,
@@ -251,26 +259,31 @@ def build_token_stream(
         total = 0
         try:
             pieces: list[str] = []
+            chars = 0
             for _chunk_label, text in _stream_text(spec):
-                if total >= target_tokens:
+                if chars >= target_tokens * _CHARS_PER_TOKEN:
                     break
                 pieces.append(text)
-                total += len(text)
+                chars += len(text)
             if not pieces:
                 raise ValueError("no text produced tokens")
+            # Join once. This used to be done three times over the whole corpus,
+            # which tripled peak memory for no reason.
+            blob = "".join(pieces)
+            pieces.clear()
+            del pieces
+            raw = np.frombuffer(blob.encode("utf-8", "ignore"), dtype=np.uint8)
+            del blob
             # Fit the run vocabulary on this corpus, then encode. The earlier
-            # modulo-hash tokenizer collided 13265 distinct byte runs onto shared
-            # ids, which capped learnable signal at 7.53 nats and stalled loss.
+            # modulo-hash tokenizer collided distinct byte runs onto shared ids,
+            # which capped learnable signal and stalled loss.
             tokenizer = FittedRunTokenizer(vocab_size=vocab_size, run=4).fit(
-                "".join(pieces)
+                raw.tobytes().decode("utf-8", "ignore")
             )
-            ids = tokenizer.encode_bytes(
-                np.frombuffer("".join(pieces).encode("utf-8", "ignore"), dtype=np.uint8)
-            )
+            ids = tokenizer.encode_bytes(raw)
             if ids is None or len(ids) == 0:
                 raise ValueError("tokenizer produced no ids")
-            if total == 0:
-                raise ValueError("no text produced tokens")
+            total = int(len(ids))
         except Exception as exc:  # noqa: BLE001
             attempts.append(
                 {
@@ -283,9 +296,7 @@ def build_token_stream(
                 print(f"    unavailable: {type(exc).__name__}", flush=True)
             continue
 
-        corpus_info = tokenizer.describe(
-            np.frombuffer("".join(pieces).encode("utf-8", "ignore"), dtype=np.uint8)
-        )
+        corpus_info = tokenizer.describe(raw)
         corpus_info["unigram_floor_nats"] = unigram_floor(ids)
         corpus_info["collision_note"] = (
             "no collisions: unseen runs fall back to raw bytes, so distinct "
@@ -294,11 +305,16 @@ def build_token_stream(
         attempts.append({"dataset": label, "ok": True, "tokens": int(total)})
         if verbose:
             print(
-                f"    loaded {total:,} tokens in "
+                f"    loaded {total:,} tokens from {chars:,} chars in "
                 f"{time.perf_counter() - started:.1f}s",
                 flush=True,
             )
-        stream = np.asarray(ids, dtype=np.int64)
+        if total > target_tokens:
+            ids = ids[:target_tokens]
+            total = int(len(ids))
+        # int32 halves the resident size of the stream; ids never exceed a vocab
+        # that fits in 32 bits, and nothing here needs int64.
+        stream = np.asarray(ids, dtype=np.int32)
         break
 
     used_fallback = False
@@ -963,11 +979,19 @@ def train(args: argparse.Namespace) -> int:
 
             stability = model.state_stability(seq_len)
             window = step_times[-args.report_every :] or step_times
+            aux_values = {k: float(v) for k, v in (aux or {}).items()}
+            # The MoE routing penalty is reported inside the headline loss and it
+            # swings by more than 10 nats between steps, so a "spike" in the
+            # headline number may be routing churn rather than worse modelling.
+            # Record the two separately so that can be told apart.
+            main_loss = aux_values.get("loss")
             row = {
                 "step": step,
                 "total_tokens": step * tokens_per_step,
                 "tps": tokens_per_step / statistics.median(window),
                 "loss": float(loss_value.detach()),
+                "main_loss": None if main_loss is None else float(main_loss),
+                "aux_loss": aux_values.get("aux_loss"),
                 "lr": float(optimizer.param_groups[0]["lr"]),
                 "ram_total_mb": rss,
                 "ram_delta_mb": rss - base_rss,
@@ -975,7 +999,7 @@ def train(args: argparse.Namespace) -> int:
                 "energy_per_1k_j": energy_per_1k,
                 "state_stability": stability.get("similarity"),
                 "state_stability_dim": stability.get("hidden_dim"),
-                "aux": {k: float(v) for k, v in (aux or {}).items()},
+                "aux": aux_values,
                 "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             rows.append(row)
@@ -983,7 +1007,9 @@ def train(args: argparse.Namespace) -> int:
                 f"step {step:>5}/{args.steps}  "
                 f"tokens {row['total_tokens']:>10,}  "
                 f"tps {row['tps']:>7.0f}  "
-                f"loss {row['loss']:.4f}  "
+                f"loss {row['loss']:.4f}"
+                f" (main {_fmt(row['main_loss'], '.4f')}"
+                f" aux {_fmt(row['aux_loss'], '.2f')})  "
                 f"rss {rss:.0f}MB ({row['ram_delta_mb']:+.0f})  "
                 f"stab {_fmt(row['state_stability'], '.5f')}",
                 flush=True,
