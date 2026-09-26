@@ -81,6 +81,37 @@ that yourself rather than trusting the filename:
 python -m feather_v2.model --config configs/feather_20M_simple.json --count-params
 ```
 
+#### Two configs at the same width: pick on measurement
+
+`hyper.up` and `hyper.down` are `dim x hv_dim` each, so `hv_dim` alone decides
+55.8% of the parameter count and, because the Walsh-Hadamard transform is
+`O(hv_dim log hv_dim)`, most of the step time as well. Both configs below use
+`dim 352` and 2 blocks; they differ only in `hv_dim`.
+
+Measured on this machine, 2 threads, `batch 2 x seq 128`, same seed, same
+Wikipedia text, 40 steps:
+
+| config | `hv_dim` | params | main loss @40 | tok/s | RSS | RAM delta |
+| --- | --- | --- | --- | --- | --- | --- |
+| `feather_20M_simple.json` | 6144 | 20,696,188 | 8.0949 | 59 | 831 MB | +256 MB |
+| `feather_10M_fast.json` | 1024 | 10,574,972 | 8.0916 | 126 | 675 MB | +139 MB |
+
+Same loss to four decimal places, 2.1x the throughput, 19% less total memory and
+46% less memory above baseline. At 40 steps the 10.1M parameters in the
+hyperdimensional memory were not paying for themselves. Nothing here says the
+wider model is worse at 600 steps, so treat this as the cheap option that is very
+unlikely to cost accuracy, not as a proven replacement.
+
+```python
+# fast: 10.57M params, ~2x throughput
+!python feather-v2/kaggle/train_20M_simple.py --config feather-v2/configs/feather_10M_fast.json --steps 600 --report-every 50 --out benchmark_10M_fast.json
+```
+
+Note that the headline loss in the log includes the MoE routing penalty, which
+swings by more than 10 nats between reports. The training line prints both parts,
+and the artifact stores `main_loss` and `aux_loss` separately, so a rise in the
+headline number is not automatically worse modelling.
+
 One cell, from a fresh Kaggle or Colab session:
 
 ```python
