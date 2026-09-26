@@ -96,21 +96,64 @@ Wikipedia text, 40 steps:
 | `feather_20M_simple.json` | 6144 | 20,696,188 | 8.0949 | 59 | 831 MB | +256 MB |
 | `feather_10M_fast.json` | 1024 | 10,574,972 | 8.0916 | 126 | 675 MB | +139 MB |
 
-Same loss to four decimal places, 2.1x the throughput, 19% less total memory and
-46% less memory above baseline. At 40 steps the 10.1M parameters in the
-hyperdimensional memory were not paying for themselves. Nothing here says the
-wider model is worse at 600 steps, so treat this as the cheap option that is very
-unlikely to cost accuracy, not as a proven replacement.
+At 40 steps the two configs are indistinguishable, which is what an earlier
+version of this README reported as "same loss to four decimal places". **That
+was wrong and it does not survive contact with a longer run.** Comparing at
+matched token counts instead of matched steps:
+
+| tokens | 20.70M, `seq 128` | 10.57M, `seq 512` |
+| ---: | ---: | ---: |
+| 25,600 | 6.6401 | 7.9906 |
+| 51,200 | 6.2151 | 7.0308 |
+| 76,800 | 6.0823 | 6.8481 |
+
+The narrow config is ~2.1x faster per step and about **0.8 nats behind per
+token**. It is a trade, not a free win: `hv_dim` buys speed and costs loss per
+token. This comparison varies width and sequence length together, so it does not
+separate the two; a 20.70M run at `seq 512` would. Pick by wall-clock budget,
+and do not cite the 40-step row as evidence of equivalence.
 
 ```python
-# fast: 10.57M params, ~2x throughput
+# fast: 10.57M params, ~2x throughput, ~0.8 nats/token behind
 !python feather-v2/kaggle/train_20M_simple.py --config feather-v2/configs/feather_10M_fast.json --steps 600 --report-every 50 --out benchmark_10M_fast.json
 ```
+
+See `docs/DIAGNOSIS_v2.0.md` for the full set of measurements, including which
+operators actually dominate the step and which four common claims the numbers
+contradict.
 
 Note that the headline loss in the log includes the MoE routing penalty, which
 swings by more than 10 nats between reports. The training line prints both parts,
 and the artifact stores `main_loss` and `aux_loss` separately, so a rise in the
 headline number is not automatically worse modelling.
+
+### Token budget is the binding constraint
+
+The default 600-step run consumes 600 x 2 x 128 = 153,600 tokens. Measured, a
+12x increase in tokens from 12,800 to 153,600 buys only 0.25 nats, and the
+unigram entropy floor of this corpus is 6.10-6.73 nats. A loss near 6.4 at
+153,600 tokens means the model has learned token frequencies and little else.
+This is a data limit, not a capacity or architecture limit: the same model
+overfits 32 tokens to 0.14 loss in 25 steps, so the gradient path is fine.
+
+Raising `--seq-len` to 512 is the cheapest way to buy more, because the
+hyperdimensional matmuls are per-token and longer sequences amortise the fixed
+costs. Measured at `batch 2` on `feather_10M_fast.json`:
+
+| `seq_len` | tokens/step | tok/s | us/token |
+| ---: | ---: | ---: | ---: |
+| 128 | 254 | 145 | 6901.7 |
+| 256 | 510 | 164 | 6096.9 |
+| 512 | 1022 | 192 | 5219.6 |
+
+`seq 512` is 1.32x the tokens per second and 4x the tokens per step, so roughly
+5.3x the training progress per second of the `seq 128` default. For a fixed
+600 steps that is 613,200 tokens instead of 153,600.
+
+A loss of 2.0 at 600 steps is not reachable at any setting. Scaling the measured
+curve puts 6.2 nats at roughly 19M tokens, which is about 18,500 steps at
+`batch 2 x seq 512` or 5.5 hours on this class of CPU; 2.0 needs billions. If
+that is a hard requirement, change the token budget, not the model.
 
 One cell, from a fresh Kaggle or Colab session:
 
